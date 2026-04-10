@@ -6,87 +6,126 @@ Backend API for GreJiJi marketplace trust-and-settlement workflows.
 
 - Node.js 18+
 
-## Environment variables
-
-- `PORT` (optional): HTTP port to listen on. Default `3000`.
-- `HOST` (optional): bind host. Default `0.0.0.0`.
-- `NODE_ENV` (optional): runtime environment label returned by `/health`. Default `development`.
-- `DATABASE_PATH` (optional): SQLite database file path. Default `./data/grejiji.sqlite`.
-- `RELEASE_TIMEOUT_HOURS` (optional): buyer confirmation grace period before auto-release kicks in. Default `72`.
-- `AUTH_TOKEN_SECRET` (optional): HMAC secret used to sign auth tokens. Default `local-dev-secret-change-me`.
-- `AUTH_TOKEN_TTL_SECONDS` (optional): auth token lifetime in seconds. Default `43200` (12h).
-
-## Run locally
+## Quick start
 
 ```bash
 npm install
 npm start
 ```
 
-## Authentication and roles
+Default local URLs:
 
-Auth endpoints:
+- API root: `http://localhost:3000/`
+- Health: `http://localhost:3000/health`
+- Live docs: `http://localhost:3000/docs`
+- Web UI: `http://localhost:3000/app`
 
-- `POST /auth/register`
-  - Request body: `email`, `password` (min 8 chars), `role` (`buyer|seller|admin`), optional `userId`
-  - Creates user, hashes password with scrypt + random salt, and returns signed auth token.
-- `POST /auth/login`
-  - Request body: `email`, `password`
-  - Verifies credentials and returns signed auth token.
+## Documentation
 
-Protected endpoints require `Authorization: Bearer <token>`.
+- Repo API reference: `docs/api-reference.md`
+- Repo operations guide: `docs/operations.md`
+- Live browsable docs: `GET /docs`
 
-Role rules:
+## Configuration
 
-- Seller-only: `POST /listings`, `PATCH /listings/:listingId`
-- Dispute opening: participants only (`buyerId` or `sellerId` on transaction)
-- Admin-only: `POST /transactions/:id/disputes/adjudicate`, `POST /transactions/:id/disputes/resolve`, `POST /jobs/auto-release`
+- `PORT` defaults to `3000`
+- `HOST` defaults to `0.0.0.0`
+- `NODE_ENV` defaults to `development`
+- `DATABASE_PATH` defaults to `./data/grejiji.sqlite`
+- `RELEASE_TIMEOUT_HOURS` defaults to `72`
+- `AUTH_TOKEN_SECRET` defaults to `local-dev-secret-change-me`
+- `AUTH_TOKEN_TTL_SECONDS` defaults to `43200`
+- `EVIDENCE_STORAGE_PATH` defaults to `./data/dispute-evidence`
+- `EVIDENCE_MAX_BYTES` defaults to `5242880` (5 MB)
+- `SERVICE_FEE_FIXED_CENTS` defaults to `0` (flat platform fee in cents)
+- `SERVICE_FEE_PERCENT` defaults to `0` (percent fee, supports decimals like `2.5`)
+- `SETTLEMENT_CURRENCY` defaults to `USD` (3-letter ISO code)
 
-## Marketplace and settlement endpoints
+## Core capabilities
 
-- `GET /listings`
-  - Returns persisted listings.
-- `POST /listings` (seller-only)
-  - Creates listing for current seller.
-- `PATCH /listings/:listingId` (seller-only)
-  - Updates listing; only listing owner can update.
-- `POST /transactions` (authenticated)
-  - Creates accepted transaction and computes `autoReleaseDueAt` from `acceptedAt + RELEASE_TIMEOUT_HOURS`.
-- `GET /transactions/:transactionId` (participants/admin)
-  - Returns transaction state and settlement/dispute metadata.
-- `POST /transactions/:transactionId/confirm-delivery` (authenticated buyer participant)
-  - Buyer confirms delivery and settles transaction (`completed`) with payout reason `buyer_confirmation`.
-- `POST /transactions/:transactionId/disputes` (participant-only)
-  - Opens dispute and moves transaction to `disputed`.
-- `POST /transactions/:transactionId/disputes/resolve` (admin-only)
-  - Resolves dispute and returns transaction to `accepted`.
-- `POST /transactions/:transactionId/disputes/adjudicate` (admin-only)
-  - Finalizes disputed transaction with decision:
-    - `release_to_seller`
-    - `refund_to_buyer`
-    - `cancel_transaction`
-- `POST /jobs/auto-release` (admin-only)
-  - Settles eligible accepted transactions after timeout.
+- user registration and login with signed bearer tokens
+- seller-owned listing creation and updates
+- accepted transaction creation with computed auto-release deadlines
+- deterministic service-fee accounting captured at transaction creation
+- buyer confirmation flow for settlement release
+- participant dispute opening
+- admin dispute resolution and adjudication
+- dispute evidence uploads with local file persistence
+- participant/admin evidence metadata and download access
+- admin dispute queue and dispute detail APIs
+- auditable transaction event history
+- immutable settlement snapshots for completed/refunded/cancelled outcomes
+- atomic notification outbox writes for downstream processing
+- notification dispatch job with retry/backoff metadata
+- user inbox APIs for listing and acknowledging delivered notifications
 
-## Operational notes
-
-- Users and listings are persisted in SQLite (`users`, `listings` tables).
-- Transaction payout release remains one-time only (`payoutReleasedAt` immutable once set).
-- Auto-release ignores transactions with open disputes.
-- Adjudication metadata is persisted and returned with transaction payloads.
-- SQLite migrations are auto-applied from `migrations/*.sql` at startup.
-
-## Run tests
+## Test suite
 
 ```bash
 npm test
 ```
 
-Coverage includes:
+Frontend smoke checks (served shell/assets) are included in `npm test` under `test/smoke.test.js`.
 
-- health endpoint
-- register/login success + login rejection
-- unauthorized access rejection on protected routes
-- seller-only listing create/update enforcement
-- participant-only dispute opening
-- admin-only adjudication and auto-release enforcement
+## Frontend workflow
+
+The responsive web console at `GET /app` is API-backed and role-aware:
+
+- Auth forms for register/login (`buyer`, `seller`, `admin`).
+- Buyer flow: browse listings, create purchase transaction, confirm delivery, open dispute, upload evidence.
+- Seller flow: create listings, inspect transactions, open dispute, upload evidence.
+- Admin flow: load dispute queue/detail, resolve/adjudicate disputes, inspect evidence and events.
+- Shared flow: view settlement breakdown fields (`itemPrice`, `serviceFee`, `totalBuyerCharge`, `sellerNet`, `currency`) and inbox notifications.
+
+No separate frontend build step is required. Server routes:
+
+- `GET /app` serves HTML shell
+- `GET /app/client.js` serves browser logic
+- `GET /app/styles.css` serves responsive styling
+
+## Notification dispatcher and inbox inspection
+
+## Settlement breakdown payload shape
+
+Transaction responses now include persisted fee accounting fields:
+
+```json
+{
+  "transaction": {
+    "amountCents": 12000,
+    "itemPrice": 12000,
+    "serviceFee": 700,
+    "totalBuyerCharge": 12700,
+    "sellerNet": 12000,
+    "currency": "USD",
+    "settlementOutcome": "completed",
+    "settledBuyerCharge": 12700,
+    "settledSellerPayout": 12000,
+    "settledPlatformFee": 700
+  }
+}
+```
+
+Run one dispatch cycle (admin token required):
+
+```bash
+curl -sS -X POST http://localhost:3000/jobs/notification-dispatch \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"limit":100}'
+```
+
+Read inbox notifications for the authenticated user:
+
+```bash
+curl -sS http://localhost:3000/notifications \
+  -H "Authorization: Bearer <user-token>"
+```
+
+Useful local DB checks:
+
+```bash
+sqlite3 ./data/grejiji.sqlite "SELECT id, transaction_id, topic, status, attempt_count, last_attempt_at, next_retry_at, sent_at, failed_at FROM notification_outbox ORDER BY id;"
+sqlite3 ./data/grejiji.sqlite "SELECT id, recipient_user_id, transaction_id, topic, status, created_at, read_at, acknowledged_at FROM user_notifications ORDER BY id;"
+sqlite3 ./data/grejiji.sqlite "SELECT id, transaction_id, uploader_user_id, mime_type, size_bytes, checksum_sha256, storage_key, created_at FROM dispute_evidence ORDER BY created_at, id;"
+```

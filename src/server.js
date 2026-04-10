@@ -1,20 +1,27 @@
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { StoreError, createTransactionStore } from "./db.js";
+import { renderDocsPage } from "./docs-page.js";
+import { renderWebAppPage } from "./web/app-page.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const defaultDatabasePath = path.join(__dirname, "..", "data", "grejiji.sqlite");
+const defaultEvidenceStoragePath = path.join(__dirname, "..", "data", "dispute-evidence");
 const migrationsDirectory = path.join(__dirname, "..", "migrations");
+const webClientFilePath = path.join(__dirname, "web", "client.js");
+const webStylesFilePath = path.join(__dirname, "web", "styles.css");
 
 const port = Number(process.env.PORT ?? 3000);
 const host = process.env.HOST ?? "0.0.0.0";
 const nodeEnv = process.env.NODE_ENV ?? "development";
 const authTokenSecret = process.env.AUTH_TOKEN_SECRET ?? "local-dev-secret-change-me";
 const tokenTtlSeconds = Number(process.env.AUTH_TOKEN_TTL_SECONDS ?? 60 * 60 * 12);
+const evidenceMaxBytes = Number(process.env.EVIDENCE_MAX_BYTES ?? 5 * 1024 * 1024);
 
 function parseReleaseTimeoutHours(value) {
   const parsed = Number(value ?? 72);
@@ -24,9 +31,45 @@ function parseReleaseTimeoutHours(value) {
   return parsed;
 }
 
+function parseEvidenceMaxBytes(value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error("EVIDENCE_MAX_BYTES must be a positive number");
+  }
+  return Math.floor(value);
+}
+
+function parseServiceFeeFixedCents(value) {
+  const parsed = Number(value ?? 0);
+  if (!Number.isFinite(parsed) || parsed < 0 || !Number.isInteger(parsed)) {
+    throw new Error("SERVICE_FEE_FIXED_CENTS must be a non-negative integer");
+  }
+  return parsed;
+}
+
+function parseServiceFeePercentToBps(value) {
+  const parsed = Number(value ?? 0);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error("SERVICE_FEE_PERCENT must be a non-negative number");
+  }
+  return Math.round(parsed * 100);
+}
+
+function parseSettlementCurrency(value) {
+  const normalized = String(value ?? "USD").trim().toUpperCase();
+  if (!/^[A-Z]{3}$/.test(normalized)) {
+    throw new Error("SETTLEMENT_CURRENCY must be a 3-letter ISO currency code");
+  }
+  return normalized;
+}
+
 function sendJson(res, statusCode, payload) {
   res.writeHead(statusCode, { "Content-Type": "application/json" });
   res.end(JSON.stringify(payload));
+}
+
+function sendHtml(res, statusCode, html) {
+  res.writeHead(statusCode, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(html);
 }
 
 function getPathParams(pathname, pattern) {
@@ -208,11 +251,51 @@ function canReadTransaction(user, transaction) {
   return user.id === transaction.buyerId || user.id === transaction.sellerId;
 }
 
-export function createServer({ databasePath, releaseTimeoutHours } = {}) {
+function canUploadDisputeEvidence(user, transaction) {
+  return user.id === transaction.buyerId || user.id === transaction.sellerId;
+}
+
+function parseBase64Content(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new StoreError("validation", "contentBase64 is required");
+  }
+  const normalized = value.trim();
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(normalized) || normalized.length % 4 !== 0) {
+    throw new StoreError("validation", "contentBase64 must be valid base64");
+  }
+  return Buffer.from(normalized, "base64");
+}
+
+function sanitizeFileName(fileName) {
+  return fileName.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+export function createServer({
+  databasePath,
+  releaseTimeoutHours,
+  dispatchNotification,
+  serviceFeeFixedCents,
+  serviceFeePercent,
+  settlementCurrency,
+  evidenceStoragePath
+} = {}) {
+  const resolvedEvidenceStoragePath =
+    evidenceStoragePath ?? process.env.EVIDENCE_STORAGE_PATH ?? defaultEvidenceStoragePath;
+  const resolvedEvidenceMaxBytes = parseEvidenceMaxBytes(evidenceMaxBytes);
   const store = createTransactionStore({
     databasePath: databasePath ?? process.env.DATABASE_PATH ?? defaultDatabasePath,
     migrationsDirectory,
-    releaseTimeoutHours: releaseTimeoutHours ?? parseReleaseTimeoutHours(process.env.RELEASE_TIMEOUT_HOURS)
+    releaseTimeoutHours: releaseTimeoutHours ?? parseReleaseTimeoutHours(process.env.RELEASE_TIMEOUT_HOURS),
+    serviceFeeFixedCents: parseServiceFeeFixedCents(
+      serviceFeeFixedCents ?? process.env.SERVICE_FEE_FIXED_CENTS
+    ),
+    serviceFeeRateBps: parseServiceFeePercentToBps(
+      serviceFeePercent ?? process.env.SERVICE_FEE_PERCENT
+    ),
+    settlementCurrency: parseSettlementCurrency(
+      settlementCurrency ?? process.env.SETTLEMENT_CURRENCY
+    ),
+    dispatchNotification
   });
 
   const requestHandler = async (req, res) => {
@@ -221,6 +304,30 @@ export function createServer({ databasePath, releaseTimeoutHours } = {}) {
     try {
       if (req.method === "GET" && url.pathname === "/health") {
         sendJson(res, 200, { status: "ok", service: "grejiji-api", env: nodeEnv });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/docs") {
+        sendHtml(res, 200, renderDocsPage());
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/app") {
+        sendHtml(res, 200, renderWebAppPage());
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/app/client.js") {
+        const script = await fs.readFile(webClientFilePath, "utf8");
+        res.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8" });
+        res.end(script);
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/app/styles.css") {
+        const styles = await fs.readFile(webStylesFilePath, "utf8");
+        res.writeHead(200, { "Content-Type": "text/css; charset=utf-8" });
+        res.end(styles);
         return;
       }
 
@@ -275,6 +382,18 @@ export function createServer({ databasePath, releaseTimeoutHours } = {}) {
         return;
       }
 
+      if (req.method === "GET" && url.pathname === "/notifications") {
+        const currentUser = requireAuth(req, store);
+        const limitRaw = url.searchParams.get("limit");
+        const limit = limitRaw === null ? 100 : Number(limitRaw);
+        const notifications = store.listUserNotifications({
+          recipientUserId: currentUser.id,
+          limit
+        });
+        sendJson(res, 200, { notifications });
+        return;
+      }
+
       if (req.method === "POST" && url.pathname === "/listings") {
         const currentUser = requireAuth(req, store);
         requireRole(currentUser, "seller");
@@ -315,6 +434,35 @@ export function createServer({ databasePath, releaseTimeoutHours } = {}) {
         }
       }
 
+      if (req.method === "POST") {
+        const markReadParams = getPathParams(url.pathname, /^\/notifications\/(\d+)\/read$/);
+        if (markReadParams) {
+          const currentUser = requireAuth(req, store);
+          const [notificationId] = markReadParams;
+          const notification = store.markNotificationAsRead({
+            id: Number(notificationId),
+            recipientUserId: currentUser.id
+          });
+          sendJson(res, 200, { notification });
+          return;
+        }
+
+        const acknowledgeParams = getPathParams(
+          url.pathname,
+          /^\/notifications\/(\d+)\/acknowledge$/
+        );
+        if (acknowledgeParams) {
+          const currentUser = requireAuth(req, store);
+          const [notificationId] = acknowledgeParams;
+          const notification = store.markNotificationAsAcknowledged({
+            id: Number(notificationId),
+            recipientUserId: currentUser.id
+          });
+          sendJson(res, 200, { notification });
+          return;
+        }
+      }
+
       if (req.method === "POST" && url.pathname === "/transactions") {
         const currentUser = requireAuth(req, store);
         const body = await readRequestBody(req);
@@ -332,13 +480,143 @@ export function createServer({ databasePath, releaseTimeoutHours } = {}) {
           buyerId: body.buyerId,
           sellerId: body.sellerId,
           amountCents: body.amountCents,
-          acceptedAt: body.acceptedAt
+          acceptedAt: body.acceptedAt,
+          actorId: currentUser.id
         });
         sendJson(res, 201, { transaction });
         return;
       }
 
       if (req.method === "GET") {
+        const adminDisputesParams = getPathParams(url.pathname, /^\/admin\/disputes$/);
+        if (adminDisputesParams) {
+          const currentUser = requireAuth(req, store);
+          requireRole(currentUser, "admin");
+          const filter = url.searchParams.get("filter") ?? "open";
+          const sortBy = url.searchParams.get("sortBy") ?? "updatedAt";
+          const sortOrder = url.searchParams.get("sortOrder") ?? "desc";
+          const nowAt = url.searchParams.get("nowAt") ?? undefined;
+          const disputes = store.listAdminDisputeQueue({ filter, sortBy, sortOrder, nowAt });
+          sendJson(res, 200, { disputes });
+          return;
+        }
+
+        const adminDisputeDetailParams = getPathParams(url.pathname, /^\/admin\/disputes\/([^/]+)$/);
+        if (adminDisputeDetailParams) {
+          const currentUser = requireAuth(req, store);
+          requireRole(currentUser, "admin");
+          const [transactionId] = adminDisputeDetailParams;
+          const transaction = store.getTransactionById(transactionId);
+          if (!transaction) {
+            sendJson(res, 404, { error: "transaction not found" });
+            return;
+          }
+
+          const events = store.getTransactionEventHistory({ id: transactionId });
+          const evidence = store.listDisputeEvidence({ transactionId });
+          const adjudicationActions = events.filter(
+            (event) =>
+              event.eventType === "dispute_resolved" ||
+              event.eventType === "dispute_adjudicated" ||
+              event.eventType.startsWith("settlement_")
+          );
+
+          sendJson(res, 200, {
+            dispute: {
+              transaction,
+              evidence,
+              events,
+              adjudicationActions
+            }
+          });
+          return;
+        }
+
+        const evidenceDownloadParams = getPathParams(
+          url.pathname,
+          /^\/transactions\/([^/]+)\/disputes\/evidence\/([^/]+)\/download$/
+        );
+        if (evidenceDownloadParams) {
+          const currentUser = requireAuth(req, store);
+          const [transactionId, evidenceId] = evidenceDownloadParams;
+          const transaction = store.getTransactionById(transactionId);
+          if (!transaction) {
+            sendJson(res, 404, { error: "transaction not found" });
+            return;
+          }
+          if (!canReadTransaction(currentUser, transaction)) {
+            throw new StoreError(
+              "forbidden",
+              "only participants or admin can download dispute evidence"
+            );
+          }
+
+          const evidence = store.getDisputeEvidenceById({ transactionId, evidenceId });
+          const filePath = path.join(resolvedEvidenceStoragePath, evidence.storageKey);
+          let data;
+          try {
+            data = await fs.readFile(filePath);
+          } catch (error) {
+            if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+              throw new StoreError("not_found", "evidence file not found");
+            }
+            throw error;
+          }
+
+          res.writeHead(200, {
+            "Content-Type": evidence.mimeType,
+            "Content-Length": String(data.length),
+            "Content-Disposition": `attachment; filename="${sanitizeFileName(evidence.originalFileName)}"`
+          });
+          res.end(data);
+          return;
+        }
+
+        const evidenceListParams = getPathParams(
+          url.pathname,
+          /^\/transactions\/([^/]+)\/disputes\/evidence$/
+        );
+        if (evidenceListParams) {
+          const currentUser = requireAuth(req, store);
+          const [transactionId] = evidenceListParams;
+          const transaction = store.getTransactionById(transactionId);
+          if (!transaction) {
+            sendJson(res, 404, { error: "transaction not found" });
+            return;
+          }
+          if (!canReadTransaction(currentUser, transaction)) {
+            throw new StoreError(
+              "forbidden",
+              "only participants or admin can view dispute evidence"
+            );
+          }
+          const evidence = store.listDisputeEvidence({ transactionId });
+          sendJson(res, 200, { evidence });
+          return;
+        }
+
+        const eventsParams = getPathParams(url.pathname, /^\/transactions\/([^/]+)\/events$/);
+        if (eventsParams) {
+          const currentUser = requireAuth(req, store);
+          const [transactionId] = eventsParams;
+          const transaction = store.getTransactionById(transactionId);
+          if (!transaction) {
+            sendJson(res, 404, { error: "transaction not found" });
+            return;
+          }
+
+          if (!canReadTransaction(currentUser, transaction)) {
+            throw new StoreError(
+              "forbidden",
+              "only participants or admin can view transaction events"
+            );
+          }
+
+          const events = store.getTransactionEventHistory({ id: transactionId });
+          sendJson(res, 200, { events });
+          return;
+        }
+
         const params = getPathParams(url.pathname, /^\/transactions\/([^/]+)$/);
         if (params) {
           const currentUser = requireAuth(req, store);
@@ -359,6 +637,77 @@ export function createServer({ databasePath, releaseTimeoutHours } = {}) {
       }
 
       if (req.method === "POST") {
+        const evidenceUploadParams = getPathParams(
+          url.pathname,
+          /^\/transactions\/([^/]+)\/disputes\/evidence$/
+        );
+        if (evidenceUploadParams) {
+          const currentUser = requireAuth(req, store);
+          const [transactionId] = evidenceUploadParams;
+          const transaction = store.getTransactionById(transactionId);
+          if (!transaction) {
+            sendJson(res, 404, { error: "transaction not found" });
+            return;
+          }
+          if (!canUploadDisputeEvidence(currentUser, transaction)) {
+            throw new StoreError(
+              "forbidden",
+              "only transaction participants can upload dispute evidence"
+            );
+          }
+
+          const body = await readRequestBody(req);
+          if (!body.fileName || typeof body.fileName !== "string" || !body.fileName.trim()) {
+            throw new StoreError("validation", "fileName is required");
+          }
+          if (body.fileName.length > 255) {
+            throw new StoreError("validation", "fileName must be 255 characters or fewer");
+          }
+          if (!body.mimeType || typeof body.mimeType !== "string" || !body.mimeType.trim()) {
+            throw new StoreError("validation", "mimeType is required");
+          }
+
+          const content = parseBase64Content(body.contentBase64);
+          if (content.length > resolvedEvidenceMaxBytes) {
+            throw new StoreError(
+              "validation",
+              `evidence file exceeds EVIDENCE_MAX_BYTES (${resolvedEvidenceMaxBytes})`
+            );
+          }
+
+          const checksumSha256 = crypto.createHash("sha256").update(content).digest("hex");
+          if (body.checksumSha256 && body.checksumSha256 !== checksumSha256) {
+            throw new StoreError("validation", "checksumSha256 does not match content");
+          }
+
+          const evidenceId = body.evidenceId ?? crypto.randomUUID();
+          const safeName = sanitizeFileName(body.fileName.trim());
+          const storageKey = path.join(transactionId, `${evidenceId}-${safeName}`);
+          const filePath = path.join(resolvedEvidenceStoragePath, storageKey);
+          await fs.mkdir(path.dirname(filePath), { recursive: true });
+          await fs.writeFile(filePath, content, { flag: "wx" });
+
+          let evidence;
+          try {
+            evidence = store.createDisputeEvidence({
+              id: evidenceId,
+              transactionId,
+              uploaderUserId: currentUser.id,
+              originalFileName: body.fileName.trim(),
+              mimeType: body.mimeType.trim(),
+              sizeBytes: content.length,
+              checksumSha256,
+              storageKey
+            });
+          } catch (error) {
+            await fs.rm(filePath, { force: true });
+            throw error;
+          }
+
+          sendJson(res, 201, { evidence });
+          return;
+        }
+
         const confirmParams = getPathParams(
           url.pathname,
           /^\/transactions\/([^/]+)\/confirm-delivery$/
@@ -418,6 +767,18 @@ export function createServer({ databasePath, releaseTimeoutHours } = {}) {
           requireRole(currentUser, "admin");
           const body = await readRequestBody(req);
           const result = store.runAutoRelease({ nowAt: body.nowAt });
+          sendJson(res, 200, result);
+          return;
+        }
+
+        if (url.pathname === "/jobs/notification-dispatch") {
+          const currentUser = requireAuth(req, store);
+          requireRole(currentUser, "admin");
+          const body = await readRequestBody(req);
+          const result = store.processNotificationOutbox({
+            nowAt: body.nowAt,
+            limit: body.limit
+          });
           sendJson(res, 200, result);
           return;
         }

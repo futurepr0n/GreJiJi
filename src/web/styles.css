@@ -1,0 +1,246 @@
+:root {
+  --bg: #f3efe6;
+  --panel: rgba(255, 252, 247, 0.86);
+  --panel-strong: #fffdf9;
+  --text: #1f2732;
+  --muted: #4d5f6d;
+  --accent: #0d6b63;
+  --accent-strong: #115e59;
+  --accent-soft: rgba(13, 107, 99, 0.1);
+  --danger: #9f2a2a;
+  --border: rgba(28, 49, 68, 0.16);
+  --shadow: 0 24px 72px rgba(31, 39, 50, 0.12);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--text);
+  font-family: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
+  background:
+    radial-gradient(circle at 10% 5%, rgba(13, 107, 99, 0.15), transparent 32%),
+    radial-gradient(circle at 88% 10%, rgba(182, 95, 47, 0.14), transparent 28%),
+    linear-gradient(180deg, #f9f4ec 0%, var(--bg) 100%);
+}
+
+.bg-orb {
+  position: fixed;
+  z-index: -1;
+  border-radius: 999px;
+  filter: blur(32px);
+  opacity: 0.28;
+}
+
+.bg-orb-a {
+  width: 280px;
+  height: 280px;
+  top: -80px;
+  left: -40px;
+  background: #0d6b63;
+}
+
+.bg-orb-b {
+  width: 260px;
+  height: 260px;
+  top: 40px;
+  right: -80px;
+  background: #b65f2f;
+}
+
+.shell {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 20px;
+  display: grid;
+  gap: 18px;
+}
+
+.hero,
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(10px);
+}
+
+.hero {
+  padding: 28px;
+  animation: rise 420ms ease-out;
+}
+
+.panel {
+  padding: 22px;
+  animation: rise 480ms ease-out;
+}
+
+.eyebrow {
+  margin: 0 0 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-size: 0.8rem;
+}
+
+h1, h2, h3, h4 {
+  margin: 0 0 10px;
+  font-family: "Space Grotesk", "Trebuchet MS", sans-serif;
+  line-height: 1.12;
+}
+
+h1 { font-size: clamp(1.9rem, 4vw, 3.1rem); }
+h2 { font-size: clamp(1.3rem, 2.2vw, 1.8rem); }
+
+.lede, .status {
+  color: var(--muted);
+  margin: 0;
+}
+
+.grid {
+  display: grid;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+.card {
+  background: var(--panel-strong);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+label,
+.stack {
+  display: grid;
+  gap: 6px;
+  font-size: 0.92rem;
+}
+
+input,
+select,
+textarea,
+button {
+  font: inherit;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  padding: 9px 11px;
+  border-radius: 10px;
+  border: 1px solid rgba(28, 49, 68, 0.26);
+  background: #fff;
+}
+
+button {
+  border: none;
+  border-radius: 10px;
+  padding: 10px 14px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 120ms ease, background-color 120ms ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+  background: var(--accent-strong);
+}
+
+button.ghost {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.actions,
+.button-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+
+.list li {
+  padding: 10px;
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 10px;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+}
+
+.list li button {
+  padding: 6px 10px;
+  font-size: 0.85rem;
+}
+
+.log {
+  background: #10151f;
+  color: #c6ffd7;
+  border-radius: 12px;
+  padding: 12px;
+  max-height: 280px;
+  overflow: auto;
+  margin: 0;
+}
+
+.inline-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.error {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 980px) {
+  .grid.two,
+  .grid.three {
+    grid-template-columns: 1fr;
+  }
+
+  .shell {
+    padding: 14px;
+  }
+
+  .hero,
+  .panel {
+    padding: 16px;
+    border-radius: 18px;
+  }
+}
