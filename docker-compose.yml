@@ -1,0 +1,16 @@
+services:
+  api:
+    build: .
+    image: grejiji-api:local
+    env_file:
+      - .env
+    environment:
+      PORT: 3000
+      HOST: 0.0.0.0
+      DATABASE_PATH: /app/data/grejiji.sqlite
+      EVIDENCE_STORAGE_PATH: /app/data/dispute-evidence
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -19,8 +20,8 @@ async function withTestServer(options, fn) {
 
   const baseUrl = `http://127.0.0.1:${port}`;
 
-  async function requestJson(method, endpoint, body, token) {
-    const headers = { "Content-Type": "application/json" };
+  async function requestJson(method, endpoint, body, token, extraHeaders = {}) {
+    const headers = { "Content-Type": "application/json", ...extraHeaders };
     if (token) {
       headers.authorization = `Bearer ${token}`;
     }
@@ -31,6 +32,16 @@ async function withTestServer(options, fn) {
       body: body ? JSON.stringify(body) : undefined
     });
 
+    const payload = await response.json();
+    return { response, payload };
+  }
+
+  async function requestRawJson(method, endpoint, rawBody, headers = {}) {
+    const response = await fetch(`${baseUrl}${endpoint}`, {
+      method,
+      headers,
+      body: rawBody
+    });
     const payload = await response.json();
     return { response, payload };
   }
@@ -63,13 +74,21 @@ async function withTestServer(options, fn) {
   }
 
   try {
-    await fn({ requestJson, requestText, registerUser, loginUser, databasePath });
+    await fn({ requestJson, requestRawJson, requestText, registerUser, loginUser, databasePath });
   } finally {
     await new Promise((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));
     });
     await fs.rm(tempDirectory, { recursive: true, force: true });
   }
+}
+
+function signStripePayload({ body, secret, timestamp }) {
+  const signature = crypto
+    .createHmac("sha256", secret)
+    .update(`${timestamp}.${body}`)
+    .digest("hex");
+  return `t=${timestamp},v1=${signature}`;
 }
 
 test("GET /health returns ok", async () => {
@@ -79,6 +98,61 @@ test("GET /health returns ok", async () => {
     assert.equal(response.status, 200);
     assert.equal(payload.status, "ok");
     assert.equal(payload.service, "grejiji-api");
+  });
+});
+
+test("GET /ready returns service and db readiness", async () => {
+  await withTestServer({}, async ({ requestJson }) => {
+    const { response, payload } = await requestJson("GET", "/ready");
+
+    assert.equal(response.status, 200);
+    assert.equal(payload.status, "ready");
+    assert.equal(payload.service, "grejiji-api");
+    assert.equal(payload.db, "ok");
+  });
+});
+
+test("request correlation IDs propagate and /metrics exposes core SLO telemetry", async () => {
+  await withTestServer({}, async ({ requestJson }) => {
+    const correlationId = "corr-observability-test-1";
+    const register = await requestJson(
+      "POST",
+      "/auth/register",
+      {
+        userId: "metrics-buyer-1",
+        email: "metrics-buyer-1@example.com",
+        password: "buyer-password",
+        role: "buyer"
+      },
+      null,
+      { "x-correlation-id": correlationId }
+    );
+
+    assert.equal(register.response.status, 201);
+    assert.equal(register.response.headers.get("x-correlation-id"), correlationId);
+    assert.ok(register.response.headers.get("x-request-id"));
+
+    const failedLogin = await requestJson("POST", "/auth/login", {
+      email: "metrics-buyer-1@example.com",
+      password: "wrong-password"
+    });
+    assert.equal(failedLogin.response.status, 403);
+
+    const metrics = await requestJson("GET", "/metrics");
+    assert.equal(metrics.response.status, 200);
+    assert.equal(metrics.payload.service, "grejiji-api");
+    assert.ok(metrics.payload.slo?.coreFlow);
+    assert.equal(typeof metrics.payload.slo.coreFlow.availability, "number");
+    assert.equal(typeof metrics.payload.slo.coreFlow.errorBudgetBurnRate, "number");
+
+    const authRejectedCounter = metrics.payload.counters.find(
+      (entry) =>
+        entry.name === "api.requests.total" &&
+        entry.labels.flow === "auth.login" &&
+        entry.labels.outcome === "rejected"
+    );
+    assert.ok(authRejectedCounter);
+    assert.ok(authRejectedCounter.value >= 1);
   });
 });
 
@@ -102,6 +176,10 @@ test("GET /app and static assets serve the responsive web UI shell", async () =>
     assert.match(appPage.payload, /<title>GreJiJi Marketplace Console<\/title>/);
     assert.match(appPage.payload, /id="register-form"/);
     assert.match(appPage.payload, /id="admin-disputes-panel"/);
+    assert.match(appPage.payload, /id="admin-moderation-panel"/);
+    assert.match(appPage.payload, /id="admin-risk-panel"/);
+    assert.match(appPage.payload, /id="admin-moderation-action-form"/);
+    assert.match(appPage.payload, /id="admin-risk-action-form"/);
     assert.match(appPage.payload, /src="\/app\/client.js"/);
 
     const client = await requestText("GET", "/app/client.js");
@@ -109,6 +187,8 @@ test("GET /app and static assets serve the responsive web UI shell", async () =>
     assert.match(client.response.headers.get("content-type") ?? "", /text\/javascript/);
     assert.match(client.payload, /async function apiRequest/);
     assert.match(client.payload, /renderRoleUI/);
+    assert.match(client.payload, /loadModerationDetail/);
+    assert.match(client.payload, /loadTransactionRiskDetail/);
 
     const styles = await requestText("GET", "/app/styles.css");
     assert.equal(styles.response.status, 200);
@@ -136,6 +216,25 @@ test("register/login succeeds and invalid login is rejected", async () => {
     const invalidLogin = await loginUser({ email: "buyer@example.com", password: "wrong-pass" });
     assert.equal(invalidLogin.response.status, 403);
     assert.match(invalidLogin.payload.error, /invalid email or password/i);
+  });
+});
+
+test("auth routes enforce rate limiting after repeated failures", async () => {
+  await withTestServer({}, async ({ requestJson }) => {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const failed = await requestJson("POST", "/auth/login", {
+        email: "nobody@example.com",
+        password: "bad-password"
+      });
+      assert.equal(failed.response.status, 403);
+    }
+
+    const throttled = await requestJson("POST", "/auth/login", {
+      email: "nobody@example.com",
+      password: "bad-password"
+    });
+    assert.equal(throttled.response.status, 429);
+    assert.match(throttled.payload.error, /rate limit/i);
   });
 });
 
@@ -395,6 +494,10 @@ test("transaction APIs expose deterministic service-fee and settlement breakdown
       assert.equal(created.payload.transaction.sellerNet, 10000);
       assert.equal(created.payload.transaction.currency, "CAD");
       assert.equal(created.payload.transaction.settlementOutcome, null);
+      assert.equal(created.payload.transaction.paymentProvider, "local");
+      assert.equal(created.payload.transaction.paymentStatus, "captured");
+      assert.match(created.payload.transaction.providerPaymentIntentId, /^pi_local_/);
+      assert.match(created.payload.transaction.providerChargeId, /^ch_local_/);
 
       const fetched = await requestJson(
         "GET",
@@ -407,6 +510,8 @@ test("transaction APIs expose deterministic service-fee and settlement breakdown
       assert.equal(fetched.payload.transaction.totalBuyerCharge, 10700);
       assert.equal(fetched.payload.transaction.sellerNet, 10000);
       assert.equal(fetched.payload.transaction.currency, "CAD");
+      assert.equal(fetched.payload.transaction.paymentProvider, "local");
+      assert.equal(fetched.payload.transaction.paymentStatus, "captured");
     }
   );
 });
@@ -414,7 +519,7 @@ test("transaction APIs expose deterministic service-fee and settlement breakdown
 test("settlement outcomes persist auditable completed, refunded, and cancelled financial snapshots", async () => {
   await withTestServer(
     { serviceFeeFixedCents: 300, serviceFeePercent: 2.5, settlementCurrency: "USD" },
-    async ({ requestJson, registerUser }) => {
+    async ({ requestJson, registerUser, databasePath }) => {
       const seller = await registerUser({
         userId: "seller-fee-2",
         email: "seller-fee-2@example.com",
@@ -499,12 +604,35 @@ test("settlement outcomes persist auditable completed, refunded, and cancelled f
       assert.equal(refund.payload.transaction.settledBuyerCharge, 0);
       assert.equal(refund.payload.transaction.settledSellerPayout, 0);
       assert.equal(refund.payload.transaction.settledPlatformFee, 0);
+      assert.equal(refund.payload.transaction.paymentStatus, "refunded");
+      assert.match(refund.payload.transaction.providerLastRefundId, /^re_local_/);
 
       assert.equal(cancelled.response.status, 200);
       assert.equal(cancelled.payload.transaction.settlementOutcome, "cancelled");
       assert.equal(cancelled.payload.transaction.settledBuyerCharge, 0);
       assert.equal(cancelled.payload.transaction.settledSellerPayout, 0);
       assert.equal(cancelled.payload.transaction.settledPlatformFee, 0);
+      assert.equal(cancelled.payload.transaction.paymentStatus, "refunded");
+      assert.match(cancelled.payload.transaction.providerLastRefundId, /^re_local_/);
+
+      const db = new Database(databasePath, { readonly: true });
+      const paymentOps = db
+        .prepare(
+          "SELECT transaction_id, operation, provider, status FROM payment_operations WHERE transaction_id IN ('txn-fee-release', 'txn-fee-refund', 'txn-fee-cancel') ORDER BY transaction_id, operation"
+        )
+        .all();
+      db.close();
+
+      assert.deepEqual(
+        paymentOps.map((row) => `${row.transaction_id}:${row.operation}:${row.provider}:${row.status}`),
+        [
+          "txn-fee-cancel:authorize_capture:local:succeeded",
+          "txn-fee-cancel:refund:local:succeeded",
+          "txn-fee-refund:authorize_capture:local:succeeded",
+          "txn-fee-refund:refund:local:succeeded",
+          "txn-fee-release:authorize_capture:local:succeeded"
+        ]
+      );
     }
   );
 });
@@ -1130,4 +1258,314 @@ test("notification dispatcher records retries and backoff metadata on failure", 
       assert.equal(deliveredRows.count, 1);
     }
   );
+});
+
+test("stripe webhook rejects invalid signatures and persists failed audit row", async () => {
+  const previousSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  const previousTolerance = process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS;
+  process.env.STRIPE_WEBHOOK_SECRET = "whsec_test_invalid_signature";
+  process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS = "300";
+
+  try {
+    await withTestServer({}, async ({ requestJson, requestRawJson, registerUser }) => {
+      const admin = await registerUser({
+        userId: "admin-webhook-invalid-1",
+        email: "admin-webhook-invalid-1@example.com",
+        password: "admin-password",
+        role: "admin"
+      });
+
+      const payload = JSON.stringify({
+        id: "evt_invalid_sig_1",
+        type: "payment_intent.succeeded",
+        created: 1_900_000_000,
+        data: {
+          object: {
+            id: "pi_invalid_sig_1",
+            metadata: {
+              transaction_id: "txn-missing-invalid-signature"
+            }
+          }
+        }
+      });
+
+      const invalidResponse = await requestRawJson("POST", "/webhooks/stripe", payload, {
+        "content-type": "application/json",
+        "stripe-signature": "t=1900000000,v1=deadbeef"
+      });
+      assert.equal(invalidResponse.response.status, 400);
+      assert.match(invalidResponse.payload.error, /invalid webhook signature/i);
+
+      const events = await requestJson("GET", "/admin/payment-webhooks?status=failed", undefined, admin.token);
+      assert.equal(events.response.status, 200);
+      const event = events.payload.events.find((entry) => entry.eventId === "evt_invalid_sig_1");
+      assert.ok(event);
+      assert.equal(event.status, "failed");
+      assert.equal(event.signatureValid, false);
+    });
+  } finally {
+    process.env.STRIPE_WEBHOOK_SECRET = previousSecret;
+    process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS = previousTolerance;
+  }
+});
+
+test("stripe webhook handles duplicate and out-of-order events and reconciliation corrects drift", async () => {
+  const previousSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  const previousTolerance = process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS;
+  process.env.STRIPE_WEBHOOK_SECRET = "whsec_test_dedupe";
+  process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS = "300";
+
+  try {
+    await withTestServer({}, async ({ requestJson, requestRawJson, registerUser, databasePath }) => {
+      const seller = await registerUser({
+        userId: "seller-webhook-1",
+        email: "seller-webhook-1@example.com",
+        password: "seller-password",
+        role: "seller"
+      });
+      const buyer = await registerUser({
+        userId: "buyer-webhook-1",
+        email: "buyer-webhook-1@example.com",
+        password: "buyer-password",
+        role: "buyer"
+      });
+      const admin = await registerUser({
+        userId: "admin-webhook-1",
+        email: "admin-webhook-1@example.com",
+        password: "admin-password",
+        role: "admin"
+      });
+
+      const createTransaction = await requestJson(
+        "POST",
+        "/transactions",
+        {
+          transactionId: "txn-webhook-1",
+          buyerId: buyer.user.id,
+          amountCents: 19000
+        },
+        seller.token
+      );
+      assert.equal(createTransaction.response.status, 201);
+
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const succeededEvent = {
+        id: "evt_dedupe_succeeded_1",
+        type: "payment_intent.succeeded",
+        created: nowSeconds - 10,
+        data: {
+          object: {
+            id: "pi_dedupe_1",
+            metadata: {
+              transaction_id: "txn-webhook-1"
+            }
+          }
+        }
+      };
+      const succeededBody = JSON.stringify(succeededEvent);
+      const succeededSig = signStripePayload({
+        body: succeededBody,
+        secret: process.env.STRIPE_WEBHOOK_SECRET,
+        timestamp: nowSeconds
+      });
+
+      const firstDelivery = await requestRawJson("POST", "/webhooks/stripe", succeededBody, {
+        "content-type": "application/json",
+        "stripe-signature": succeededSig
+      });
+      assert.equal(firstDelivery.response.status, 200);
+      assert.equal(firstDelivery.payload.result.applied, true);
+
+      const duplicateDelivery = await requestRawJson("POST", "/webhooks/stripe", succeededBody, {
+        "content-type": "application/json",
+        "stripe-signature": succeededSig
+      });
+      assert.equal(duplicateDelivery.response.status, 200);
+      assert.equal(duplicateDelivery.payload.result.applied, false);
+      assert.equal(duplicateDelivery.payload.result.reason, "duplicate_delivery");
+
+      const failedEvent = {
+        id: "evt_failed_newer_1",
+        type: "payment_intent.payment_failed",
+        created: nowSeconds + 2,
+        data: {
+          object: {
+            id: "pi_dedupe_1",
+            metadata: {
+              transaction_id: "txn-webhook-1"
+            }
+          }
+        }
+      };
+      const failedBody = JSON.stringify(failedEvent);
+      const failedSig = signStripePayload({
+        body: failedBody,
+        secret: process.env.STRIPE_WEBHOOK_SECRET,
+        timestamp: nowSeconds
+      });
+      const failedDelivery = await requestRawJson("POST", "/webhooks/stripe", failedBody, {
+        "content-type": "application/json",
+        "stripe-signature": failedSig
+      });
+      assert.equal(failedDelivery.response.status, 200);
+      assert.equal(failedDelivery.payload.result.applied, true);
+      assert.equal(failedDelivery.payload.result.paymentStatus, "failed");
+
+      const oldSucceededEvent = {
+        id: "evt_succeeded_older_1",
+        type: "payment_intent.succeeded",
+        created: nowSeconds - 120,
+        data: {
+          object: {
+            id: "pi_dedupe_1",
+            metadata: {
+              transaction_id: "txn-webhook-1"
+            }
+          }
+        }
+      };
+      const oldSucceededBody = JSON.stringify(oldSucceededEvent);
+      const oldSucceededSig = signStripePayload({
+        body: oldSucceededBody,
+        secret: process.env.STRIPE_WEBHOOK_SECRET,
+        timestamp: nowSeconds
+      });
+      const outOfOrderDelivery = await requestRawJson(
+        "POST",
+        "/webhooks/stripe",
+        oldSucceededBody,
+        {
+          "content-type": "application/json",
+          "stripe-signature": oldSucceededSig
+        }
+      );
+      assert.equal(outOfOrderDelivery.response.status, 200);
+      assert.equal(outOfOrderDelivery.payload.result.applied, false);
+      assert.equal(outOfOrderDelivery.payload.result.reason, "out_of_order_ignored");
+
+      const transactionAfterOutOfOrder = await requestJson(
+        "GET",
+        "/transactions/txn-webhook-1",
+        undefined,
+        admin.token
+      );
+      assert.equal(transactionAfterOutOfOrder.response.status, 200);
+      assert.equal(transactionAfterOutOfOrder.payload.transaction.paymentStatus, "failed");
+      assert.ok("itemPrice" in transactionAfterOutOfOrder.payload.transaction);
+      assert.ok("serviceFee" in transactionAfterOutOfOrder.payload.transaction);
+      assert.ok("totalBuyerCharge" in transactionAfterOutOfOrder.payload.transaction);
+      assert.ok("sellerNet" in transactionAfterOutOfOrder.payload.transaction);
+
+      const db = new Database(databasePath);
+      db.prepare("UPDATE transactions SET payment_status = 'captured' WHERE id = ?").run("txn-webhook-1");
+      db.close();
+
+      const reconcile = await requestJson(
+        "POST",
+        "/jobs/payment-reconciliation",
+        { limit: 20 },
+        admin.token
+      );
+      assert.equal(reconcile.response.status, 200);
+      assert.equal(reconcile.payload.correctedCount, 1);
+      assert.equal(reconcile.payload.corrections[0].transactionId, "txn-webhook-1");
+      assert.equal(reconcile.payload.corrections[0].correctedPaymentStatus, "failed");
+    });
+  } finally {
+    process.env.STRIPE_WEBHOOK_SECRET = previousSecret;
+    process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS = previousTolerance;
+  }
+});
+
+test("admin can inspect and reprocess failed webhook events safely", async () => {
+  const previousSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  const previousTolerance = process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS;
+  process.env.STRIPE_WEBHOOK_SECRET = "whsec_test_reprocess";
+  process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS = "300";
+
+  try {
+    await withTestServer({}, async ({ requestJson, requestRawJson, registerUser }) => {
+      const seller = await registerUser({
+        userId: "seller-webhook-reprocess-1",
+        email: "seller-webhook-reprocess-1@example.com",
+        password: "seller-password",
+        role: "seller"
+      });
+      const buyer = await registerUser({
+        userId: "buyer-webhook-reprocess-1",
+        email: "buyer-webhook-reprocess-1@example.com",
+        password: "buyer-password",
+        role: "buyer"
+      });
+      const admin = await registerUser({
+        userId: "admin-webhook-reprocess-1",
+        email: "admin-webhook-reprocess-1@example.com",
+        password: "admin-password",
+        role: "admin"
+      });
+
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const event = {
+        id: "evt_needs_reprocess_1",
+        type: "payment_intent.succeeded",
+        created: nowSeconds,
+        data: {
+          object: {
+            id: "pi_reprocess_1",
+            metadata: {
+              transaction_id: "txn-reprocess-1"
+            }
+          }
+        }
+      };
+      const body = JSON.stringify(event);
+      const signature = signStripePayload({
+        body,
+        secret: process.env.STRIPE_WEBHOOK_SECRET,
+        timestamp: nowSeconds
+      });
+
+      const firstAttempt = await requestRawJson("POST", "/webhooks/stripe", body, {
+        "content-type": "application/json",
+        "stripe-signature": signature
+      });
+      assert.equal(firstAttempt.response.status, 200);
+      assert.equal(firstAttempt.payload.result.reason, "transaction_not_found");
+
+      const createTransaction = await requestJson(
+        "POST",
+        "/transactions",
+        {
+          transactionId: "txn-reprocess-1",
+          buyerId: buyer.user.id,
+          amountCents: 17500
+        },
+        seller.token
+      );
+      assert.equal(createTransaction.response.status, 201);
+
+      const failedList = await requestJson(
+        "GET",
+        "/admin/payment-webhooks?status=failed&provider=stripe",
+        undefined,
+        admin.token
+      );
+      assert.equal(failedList.response.status, 200);
+      const failedEvent = failedList.payload.events.find((entry) => entry.eventId === "evt_needs_reprocess_1");
+      assert.ok(failedEvent);
+
+      const replay = await requestJson(
+        "POST",
+        `/admin/payment-webhooks/${failedEvent.id}/reprocess`,
+        {},
+        admin.token
+      );
+      assert.equal(replay.response.status, 200);
+      assert.equal(replay.payload.result.reason, "applied");
+      assert.equal(replay.payload.result.transactionId, "txn-reprocess-1");
+    });
+  } finally {
+    process.env.STRIPE_WEBHOOK_SECRET = previousSecret;
+    process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS = previousTolerance;
+  }
 });
