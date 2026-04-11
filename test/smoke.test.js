@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -19,8 +20,8 @@ async function withTestServer(options, fn) {
 
   const baseUrl = `http://127.0.0.1:${port}`;
 
-  async function requestJson(method, endpoint, body, token) {
-    const headers = { "Content-Type": "application/json" };
+  async function requestJson(method, endpoint, body, token, extraHeaders = {}) {
+    const headers = { "Content-Type": "application/json", ...extraHeaders };
     if (token) {
       headers.authorization = `Bearer ${token}`;
     }
@@ -31,6 +32,16 @@ async function withTestServer(options, fn) {
       body: body ? JSON.stringify(body) : undefined
     });
 
+    const payload = await response.json();
+    return { response, payload };
+  }
+
+  async function requestRawJson(method, endpoint, rawBody, headers = {}) {
+    const response = await fetch(`${baseUrl}${endpoint}`, {
+      method,
+      headers,
+      body: rawBody
+    });
     const payload = await response.json();
     return { response, payload };
   }
@@ -63,13 +74,21 @@ async function withTestServer(options, fn) {
   }
 
   try {
-    await fn({ requestJson, requestText, registerUser, loginUser, databasePath });
+    await fn({ requestJson, requestRawJson, requestText, registerUser, loginUser, databasePath });
   } finally {
     await new Promise((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));
     });
     await fs.rm(tempDirectory, { recursive: true, force: true });
   }
+}
+
+function signStripePayload({ body, secret, timestamp }) {
+  const signature = crypto
+    .createHmac("sha256", secret)
+    .update(`${timestamp}.${body}`)
+    .digest("hex");
+  return `t=${timestamp},v1=${signature}`;
 }
 
 test("GET /health returns ok", async () => {
@@ -79,6 +98,61 @@ test("GET /health returns ok", async () => {
     assert.equal(response.status, 200);
     assert.equal(payload.status, "ok");
     assert.equal(payload.service, "grejiji-api");
+  });
+});
+
+test("GET /ready returns service and db readiness", async () => {
+  await withTestServer({}, async ({ requestJson }) => {
+    const { response, payload } = await requestJson("GET", "/ready");
+
+    assert.equal(response.status, 200);
+    assert.equal(payload.status, "ready");
+    assert.equal(payload.service, "grejiji-api");
+    assert.equal(payload.db, "ok");
+  });
+});
+
+test("request correlation IDs propagate and /metrics exposes core SLO telemetry", async () => {
+  await withTestServer({}, async ({ requestJson }) => {
+    const correlationId = "corr-observability-test-1";
+    const register = await requestJson(
+      "POST",
+      "/auth/register",
+      {
+        userId: "metrics-buyer-1",
+        email: "metrics-buyer-1@example.com",
+        password: "buyer-password",
+        role: "buyer"
+      },
+      null,
+      { "x-correlation-id": correlationId }
+    );
+
+    assert.equal(register.response.status, 201);
+    assert.equal(register.response.headers.get("x-correlation-id"), correlationId);
+    assert.ok(register.response.headers.get("x-request-id"));
+
+    const failedLogin = await requestJson("POST", "/auth/login", {
+      email: "metrics-buyer-1@example.com",
+      password: "wrong-password"
+    });
+    assert.equal(failedLogin.response.status, 403);
+
+    const metrics = await requestJson("GET", "/metrics");
+    assert.equal(metrics.response.status, 200);
+    assert.equal(metrics.payload.service, "grejiji-api");
+    assert.ok(metrics.payload.slo?.coreFlow);
+    assert.equal(typeof metrics.payload.slo.coreFlow.availability, "number");
+    assert.equal(typeof metrics.payload.slo.coreFlow.errorBudgetBurnRate, "number");
+
+    const authRejectedCounter = metrics.payload.counters.find(
+      (entry) =>
+        entry.name === "api.requests.total" &&
+        entry.labels.flow === "auth.login" &&
+        entry.labels.outcome === "rejected"
+    );
+    assert.ok(authRejectedCounter);
+    assert.ok(authRejectedCounter.value >= 1);
   });
 });
 
@@ -102,6 +176,10 @@ test("GET /app and static assets serve the responsive web UI shell", async () =>
     assert.match(appPage.payload, /<title>GreJiJi Marketplace Console<\/title>/);
     assert.match(appPage.payload, /id="register-form"/);
     assert.match(appPage.payload, /id="admin-disputes-panel"/);
+    assert.match(appPage.payload, /id="admin-moderation-panel"/);
+    assert.match(appPage.payload, /id="admin-risk-panel"/);
+    assert.match(appPage.payload, /id="admin-moderation-action-form"/);
+    assert.match(appPage.payload, /id="admin-risk-action-form"/);
     assert.match(appPage.payload, /src="\/app\/client.js"/);
 
     const client = await requestText("GET", "/app/client.js");
@@ -109,6 +187,8 @@ test("GET /app and static assets serve the responsive web UI shell", async () =>
     assert.match(client.response.headers.get("content-type") ?? "", /text\/javascript/);
     assert.match(client.payload, /async function apiRequest/);
     assert.match(client.payload, /renderRoleUI/);
+    assert.match(client.payload, /loadModerationDetail/);
+    assert.match(client.payload, /loadTransactionRiskDetail/);
 
     const styles = await requestText("GET", "/app/styles.css");
     assert.equal(styles.response.status, 200);
@@ -136,6 +216,25 @@ test("register/login succeeds and invalid login is rejected", async () => {
     const invalidLogin = await loginUser({ email: "buyer@example.com", password: "wrong-pass" });
     assert.equal(invalidLogin.response.status, 403);
     assert.match(invalidLogin.payload.error, /invalid email or password/i);
+  });
+});
+
+test("auth routes enforce rate limiting after repeated failures", async () => {
+  await withTestServer({}, async ({ requestJson }) => {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const failed = await requestJson("POST", "/auth/login", {
+        email: "nobody@example.com",
+        password: "bad-password"
+      });
+      assert.equal(failed.response.status, 403);
+    }
+
+    const throttled = await requestJson("POST", "/auth/login", {
+      email: "nobody@example.com",
+      password: "bad-password"
+    });
+    assert.equal(throttled.response.status, 429);
+    assert.match(throttled.payload.error, /rate limit/i);
   });
 });
 
@@ -395,6 +494,10 @@ test("transaction APIs expose deterministic service-fee and settlement breakdown
       assert.equal(created.payload.transaction.sellerNet, 10000);
       assert.equal(created.payload.transaction.currency, "CAD");
       assert.equal(created.payload.transaction.settlementOutcome, null);
+      assert.equal(created.payload.transaction.paymentProvider, "local");
+      assert.equal(created.payload.transaction.paymentStatus, "captured");
+      assert.match(created.payload.transaction.providerPaymentIntentId, /^pi_local_/);
+      assert.match(created.payload.transaction.providerChargeId, /^ch_local_/);
 
       const fetched = await requestJson(
         "GET",
@@ -407,6 +510,8 @@ test("transaction APIs expose deterministic service-fee and settlement breakdown
       assert.equal(fetched.payload.transaction.totalBuyerCharge, 10700);
       assert.equal(fetched.payload.transaction.sellerNet, 10000);
       assert.equal(fetched.payload.transaction.currency, "CAD");
+      assert.equal(fetched.payload.transaction.paymentProvider, "local");
+      assert.equal(fetched.payload.transaction.paymentStatus, "captured");
     }
   );
 });
@@ -414,7 +519,7 @@ test("transaction APIs expose deterministic service-fee and settlement breakdown
 test("settlement outcomes persist auditable completed, refunded, and cancelled financial snapshots", async () => {
   await withTestServer(
     { serviceFeeFixedCents: 300, serviceFeePercent: 2.5, settlementCurrency: "USD" },
-    async ({ requestJson, registerUser }) => {
+    async ({ requestJson, registerUser, databasePath }) => {
       const seller = await registerUser({
         userId: "seller-fee-2",
         email: "seller-fee-2@example.com",
@@ -499,12 +604,35 @@ test("settlement outcomes persist auditable completed, refunded, and cancelled f
       assert.equal(refund.payload.transaction.settledBuyerCharge, 0);
       assert.equal(refund.payload.transaction.settledSellerPayout, 0);
       assert.equal(refund.payload.transaction.settledPlatformFee, 0);
+      assert.equal(refund.payload.transaction.paymentStatus, "refunded");
+      assert.match(refund.payload.transaction.providerLastRefundId, /^re_local_/);
 
       assert.equal(cancelled.response.status, 200);
       assert.equal(cancelled.payload.transaction.settlementOutcome, "cancelled");
       assert.equal(cancelled.payload.transaction.settledBuyerCharge, 0);
       assert.equal(cancelled.payload.transaction.settledSellerPayout, 0);
       assert.equal(cancelled.payload.transaction.settledPlatformFee, 0);
+      assert.equal(cancelled.payload.transaction.paymentStatus, "refunded");
+      assert.match(cancelled.payload.transaction.providerLastRefundId, /^re_local_/);
+
+      const db = new Database(databasePath, { readonly: true });
+      const paymentOps = db
+        .prepare(
+          "SELECT transaction_id, operation, provider, status FROM payment_operations WHERE transaction_id IN ('txn-fee-release', 'txn-fee-refund', 'txn-fee-cancel') ORDER BY transaction_id, operation"
+        )
+        .all();
+      db.close();
+
+      assert.deepEqual(
+        paymentOps.map((row) => `${row.transaction_id}:${row.operation}:${row.provider}:${row.status}`),
+        [
+          "txn-fee-cancel:authorize_capture:local:succeeded",
+          "txn-fee-cancel:refund:local:succeeded",
+          "txn-fee-refund:authorize_capture:local:succeeded",
+          "txn-fee-refund:refund:local:succeeded",
+          "txn-fee-release:authorize_capture:local:succeeded"
+        ]
+      );
     }
   );
 });
@@ -1132,655 +1260,312 @@ test("notification dispatcher records retries and backoff metadata on failure", 
   );
 });
 
-test("trust assessment is persisted and exposed through transaction and trust endpoints", async () => {
-  await withTestServer({}, async ({ requestJson, registerUser }) => {
-    const seller = await registerUser({
-      userId: "seller-trust-1",
-      email: "seller-trust-1@example.com",
-      password: "seller-password",
-      role: "seller"
+test("stripe webhook rejects invalid signatures and persists failed audit row", async () => {
+  const previousSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  const previousTolerance = process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS;
+  process.env.STRIPE_WEBHOOK_SECRET = "whsec_test_invalid_signature";
+  process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS = "300";
+
+  try {
+    await withTestServer({}, async ({ requestJson, requestRawJson, registerUser }) => {
+      const admin = await registerUser({
+        userId: "admin-webhook-invalid-1",
+        email: "admin-webhook-invalid-1@example.com",
+        password: "admin-password",
+        role: "admin"
+      });
+
+      const payload = JSON.stringify({
+        id: "evt_invalid_sig_1",
+        type: "payment_intent.succeeded",
+        created: 1_900_000_000,
+        data: {
+          object: {
+            id: "pi_invalid_sig_1",
+            metadata: {
+              transaction_id: "txn-missing-invalid-signature"
+            }
+          }
+        }
+      });
+
+      const invalidResponse = await requestRawJson("POST", "/webhooks/stripe", payload, {
+        "content-type": "application/json",
+        "stripe-signature": "t=1900000000,v1=deadbeef"
+      });
+      assert.equal(invalidResponse.response.status, 400);
+      assert.match(invalidResponse.payload.error, /invalid webhook signature/i);
+
+      const events = await requestJson("GET", "/admin/payment-webhooks?status=failed", undefined, admin.token);
+      assert.equal(events.response.status, 200);
+      const event = events.payload.events.find((entry) => entry.eventId === "evt_invalid_sig_1");
+      assert.ok(event);
+      assert.equal(event.status, "failed");
+      assert.equal(event.signatureValid, false);
     });
-    const buyer = await registerUser({
-      userId: "buyer-trust-1",
-      email: "buyer-trust-1@example.com",
-      password: "buyer-password",
-      role: "buyer"
-    });
-
-    const listing = await requestJson(
-      "POST",
-      "/listings",
-      {
-        listingId: "listing-trust-1",
-        title: "Camera",
-        description: "Mirrorless camera",
-        priceCents: 64000,
-        localArea: "Toronto-East"
-      },
-      seller.token
-    );
-    assert.equal(listing.response.status, 201);
-
-    const created = await requestJson(
-      "POST",
-      "/transactions",
-      {
-        transactionId: "txn-trust-1",
-        buyerId: buyer.user.id,
-        amountCents: 12000
-      },
-      seller.token
-    );
-    assert.equal(created.response.status, 201);
-    assert.ok(created.payload.trustAssessment);
-    assert.equal(created.payload.trustAssessment.transactionId, "txn-trust-1");
-    assert.match(created.payload.trustAssessment.riskBand, /low|medium|high/);
-    assert.ok(Array.isArray(created.payload.trustAssessment.reasonCodes));
-
-    const fetched = await requestJson("GET", "/transactions/txn-trust-1", undefined, buyer.token);
-    assert.equal(fetched.response.status, 200);
-    assert.equal(fetched.payload.trustAssessment.transactionId, "txn-trust-1");
-
-    const trust = await requestJson("GET", "/transactions/txn-trust-1/trust", undefined, buyer.token);
-    assert.equal(trust.response.status, 200);
-    assert.equal(trust.payload.transactionId, "txn-trust-1");
-    assert.ok(Array.isArray(trust.payload.trustInterventions));
-    assert.ok(trust.payload.trustInterventions.length >= 1);
-    assert.ok(trust.payload.trustInterventions[0].reasonCodes.length >= 1);
-  });
+  } finally {
+    process.env.STRIPE_WEBHOOK_SECRET = previousSecret;
+    process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS = previousTolerance;
+  }
 });
 
-test("trust operations v12 returns deterministic low, medium, and high risk bands", async () => {
-  await withTestServer({}, async ({ requestJson, registerUser }) => {
-    const sellerLow = await registerUser({
-      userId: "seller-trust-low",
-      email: "seller-trust-low@example.com",
-      password: "seller-password",
-      role: "seller"
-    });
-    const buyerLow = await registerUser({
-      userId: "buyer-trust-low",
-      email: "buyer-trust-low@example.com",
-      password: "buyer-password",
-      role: "buyer"
-    });
-    const sellerMedium = await registerUser({
-      userId: "seller-trust-medium",
-      email: "seller-trust-medium@example.com",
-      password: "seller-password",
-      role: "seller"
-    });
-    const buyerMedium = await registerUser({
-      userId: "buyer-trust-medium",
-      email: "buyer-trust-medium@example.com",
-      password: "buyer-password",
-      role: "buyer"
-    });
-    const sellerHigh = await registerUser({
-      userId: "seller-trust-high",
-      email: "seller-trust-high@example.com",
-      password: "seller-password",
-      role: "seller"
-    });
-    const buyerHigh = await registerUser({
-      userId: "buyer-trust-high",
-      email: "buyer-trust-high@example.com",
-      password: "buyer-password",
-      role: "buyer"
-    });
+test("stripe webhook handles duplicate and out-of-order events and reconciliation corrects drift", async () => {
+  const previousSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  const previousTolerance = process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS;
+  process.env.STRIPE_WEBHOOK_SECRET = "whsec_test_dedupe";
+  process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS = "300";
 
-    const createListing = async (token, listingId, localArea) =>
-      requestJson(
-        "POST",
-        "/listings",
-        { listingId, title: listingId, description: "seed", priceCents: 50000, localArea },
-        token
-      );
-
-    assert.equal((await createListing(sellerLow.token, "listing-trust-low", "Calm-North")).response.status, 201);
-    assert.equal(
-      (await createListing(sellerMedium.token, "listing-trust-medium", "Metro-Mid")).response.status,
-      201
-    );
-    assert.equal((await createListing(sellerHigh.token, "listing-trust-high", "Metro-Risk")).response.status, 201);
-
-    const createTransaction = async (sellerToken, transactionId, buyerId, amountCents) =>
-      requestJson(
-        "POST",
-        "/transactions",
-        { transactionId, buyerId, amountCents },
-        sellerToken
-      );
-
-    const low = await createTransaction(
-      sellerLow.token,
-      "txn-trust-low-target",
-      buyerLow.user.id,
-      3000
-    );
-    assert.equal(low.response.status, 201);
-    assert.equal(low.payload.trustAssessment.riskBand, "low");
-    assert.ok(
-      low.payload.trustAssessment.intervention.recommendedControls.includes(
-        "session_risk_annotation"
-      )
-    );
-    assert.equal(low.payload.trustAssessment.policyCanaryGovernance.rolloutDecision, "promote");
-    assert.equal(low.payload.trustAssessment.policyBlastRadiusSimulation.gateDecision, "pass");
-    assert.equal(
-      low.payload.trustAssessment.crossMarketCollusionInterdiction.falsePositiveContainment
-        .maxAutomatedSuppressionMinutes,
-      0
-    );
-
-    for (let index = 1; index <= 3; index += 1) {
-      const seeded = await createTransaction(
-        sellerMedium.token,
-        `txn-trust-medium-seed-${index}`,
-        buyerMedium.user.id,
-        18000
-      );
-      assert.equal(seeded.response.status, 201);
-      if (index === 1) {
-        const opened = await requestJson(
-          "POST",
-          `/transactions/txn-trust-medium-seed-${index}/disputes`,
-          {},
-          buyerMedium.token
-        );
-        assert.equal(opened.response.status, 200);
-      }
-    }
-
-    const medium = await createTransaction(
-      sellerMedium.token,
-      "txn-trust-medium-target",
-      buyerMedium.user.id,
-      30000
-    );
-    assert.equal(medium.response.status, 201);
-    assert.equal(medium.payload.trustAssessment.riskBand, "medium");
-    assert.ok(
-      medium.payload.trustAssessment.intervention.recommendedControls.includes(
-        "step_up_verification"
-      )
-    );
-    assert.match(
-      medium.payload.trustAssessment.policyBlastRadiusSimulation.gateDecision,
-      /review|block/
-    );
-
-    const highSeedBuyers = [];
-    for (let index = 1; index <= 4; index += 1) {
-      const seededBuyer = await registerUser({
-        userId: `buyer-trust-high-seed-${index}`,
-        email: `buyer-trust-high-seed-${index}@example.com`,
+  try {
+    await withTestServer({}, async ({ requestJson, requestRawJson, registerUser, databasePath }) => {
+      const seller = await registerUser({
+        userId: "seller-webhook-1",
+        email: "seller-webhook-1@example.com",
+        password: "seller-password",
+        role: "seller"
+      });
+      const buyer = await registerUser({
+        userId: "buyer-webhook-1",
+        email: "buyer-webhook-1@example.com",
         password: "buyer-password",
         role: "buyer"
       });
-      highSeedBuyers.push(seededBuyer);
-    }
-
-    for (let index = 0; index < highSeedBuyers.length; index += 1) {
-      const buyer = highSeedBuyers[index];
-      const seeded = await createTransaction(
-        sellerHigh.token,
-        `txn-trust-high-seed-${index + 1}`,
-        buyer.user.id,
-        95000
-      );
-      assert.equal(seeded.response.status, 201);
-      const opened = await requestJson(
-        "POST",
-        `/transactions/txn-trust-high-seed-${index + 1}/disputes`,
-        {},
-        buyer.token
-      );
-      assert.equal(opened.response.status, 200);
-    }
-
-    const high = await createTransaction(
-      sellerHigh.token,
-      "txn-trust-high-target",
-      buyerHigh.user.id,
-      120000
-    );
-    assert.equal(high.response.status, 201);
-    assert.equal(high.payload.trustAssessment.riskBand, "high");
-    assert.ok(
-      high.payload.trustAssessment.intervention.recommendedControls.includes("temporary_hold")
-    );
-    assert.ok(high.payload.trustAssessment.reasonCodes.includes("geo_cluster_dispute_density_high"));
-    assert.match(
-      high.payload.trustAssessment.policyBlastRadiusSimulation.gateDecision,
-      /review|block/
-    );
-  });
-});
-
-test("trust operations v17 persists collusion interdiction, escrow attestations, and blast-radius simulation metadata", async () => {
-  await withTestServer({}, async ({ requestJson, registerUser }) => {
-    const seller = await registerUser({
-      userId: "seller-trust-v13",
-      email: "seller-trust-v13@example.com",
-      password: "seller-password",
-      role: "seller"
-    });
-    const buyerA = await registerUser({
-      userId: "buyer-trust-v13-a",
-      email: "buyer-trust-v13-a@example.com",
-      password: "buyer-password",
-      role: "buyer"
-    });
-    const buyerB = await registerUser({
-      userId: "buyer-trust-v13-b",
-      email: "buyer-trust-v13-b@example.com",
-      password: "buyer-password",
-      role: "buyer"
-    });
-
-    const listing = await requestJson(
-      "POST",
-      "/listings",
-      {
-        listingId: "listing-trust-v13",
-        title: "Monitor",
-        description: "4k monitor",
-        priceCents: 40000,
-        localArea: "Metro-Cluster"
-      },
-      seller.token
-    );
-    assert.equal(listing.response.status, 201);
-
-    const seeded = await requestJson(
-      "POST",
-      "/transactions",
-      {
-        transactionId: "txn-trust-v13-seed",
-        buyerId: buyerA.user.id,
-        amountCents: 15000,
-        deviceFingerprint: "device-v13-shared",
-        paymentFingerprint: "payment-v13-shared"
-      },
-      seller.token
-    );
-    assert.equal(seeded.response.status, 201);
-
-    const target = await requestJson(
-      "POST",
-      "/transactions",
-      {
-        transactionId: "txn-trust-v13-target",
-        buyerId: buyerB.user.id,
-        amountCents: 22000,
-        deviceFingerprint: "device-v13-shared",
-        paymentFingerprint: "payment-v13-shared"
-      },
-      seller.token
-    );
-    assert.equal(target.response.status, 201);
-
-    const trust = target.payload.trustAssessment;
-    assert.equal(trust.orchestrationVersion, "trust-ops-v17");
-    assert.ok(trust.graphSignals.linkedTransactionCount >= 1);
-    assert.ok(trust.graphSignals.entityTypeCounts.device >= 1);
-    assert.ok(trust.graphSignals.entityTypeCounts.paymentFingerprint >= 1);
-    assert.ok(Array.isArray(trust.explainability.topRiskPaths));
-    assert.ok(trust.explainability.topRiskPaths.length >= 1);
-    assert.ok(Array.isArray(trust.identityFriction.requirements));
-    assert.equal(typeof trust.postIncidentVerification.regressionDetected, "boolean");
-    assert.equal(typeof trust.fraudRingDisruption.disruptionScore, "number");
-    assert.ok(Array.isArray(trust.fraudRingDisruption.recommendedActions));
-    assert.equal(typeof trust.escrowAdversarialSimulation.maxSeverity, "number");
-    assert.ok(Array.isArray(trust.escrowAdversarialSimulation.scenarioOutcomes));
-    assert.equal(typeof trust.trustPolicyRollback.rollbackTriggered, "boolean");
-    assert.equal(typeof trust.accountTakeoverContainment.correlationScore, "number");
-    assert.ok(Array.isArray(trust.accountTakeoverContainment.recommendedActions));
-    assert.equal(typeof trust.settlementRiskStressControls.maxScenarioSeverity, "number");
-    assert.ok(Array.isArray(trust.settlementRiskStressControls.stressScenarios));
-    assert.equal(typeof trust.crossMarketCollusionInterdiction.collusionRiskScore, "number");
-    assert.ok(Array.isArray(trust.crossMarketCollusionInterdiction.graduatedInterventions));
-    assert.equal(
-      trust.crossMarketCollusionInterdiction.falsePositiveContainment.allowCounterpartyRecoveryPath,
-      true
-    );
-    assert.equal(typeof trust.escrowIntegrityAttestations.attestationStatus, "string");
-    assert.match(trust.escrowIntegrityAttestations.finalChainHash, /^[a-f0-9]{64}$/);
-    assert.ok(Array.isArray(trust.escrowIntegrityAttestations.tamperEvidentChain));
-    assert.ok(trust.escrowIntegrityAttestations.tamperEvidentChain.length >= 4);
-    assert.match(
-      trust.policyBlastRadiusSimulation.gateDecision,
-      /pass|review|block/
-    );
-    assert.match(
-      trust.policyCanaryGovernance.rolloutDecision,
-      /promote|hold|revert/
-    );
-    assert.match(trust.evidenceProvenance.snapshotId, /^trust-signal-txn-trust-v13-target-/);
-    assert.match(trust.evidenceProvenance.snapshotHash, /^[a-f0-9]{64}$/);
-    assert.ok(trust.outcomeFeedback.thresholdModel.medium >= 20);
-    assert.ok(trust.outcomeFeedback.thresholdModel.high <= 85);
-    assert.ok(
-      trust.outcomeFeedback.thresholdModel.high >= trust.outcomeFeedback.thresholdModel.medium + 15
-    );
-
-    const trustEndpoint = await requestJson(
-      "GET",
-      "/transactions/txn-trust-v13-target/trust",
-      undefined,
-      buyerB.token
-    );
-    assert.equal(trustEndpoint.response.status, 200);
-    assert.ok(trustEndpoint.payload.trustInterventions.length >= 1);
-    assert.equal(
-      trustEndpoint.payload.trustInterventions[0].provenanceRef,
-      trust.evidenceProvenance.snapshotId
-    );
-    assert.deepEqual(
-      trustEndpoint.payload.trustInterventions[0].identityFriction.requirements,
-      trust.identityFriction.requirements
-    );
-    assert.equal(
-      trustEndpoint.payload.trustInterventions[0].fraudRingDisruption.disruptionScore,
-      trust.fraudRingDisruption.disruptionScore
-    );
-    assert.equal(
-      trustEndpoint.payload.trustInterventions[0].trustPolicyRollback.rollbackTriggered,
-      trust.trustPolicyRollback.rollbackTriggered
-    );
-    assert.equal(
-      trustEndpoint.payload.trustInterventions[0].accountTakeoverContainment.correlationScore,
-      trust.accountTakeoverContainment.correlationScore
-    );
-    assert.equal(
-      trustEndpoint.payload.trustInterventions[0].policyCanaryGovernance.rolloutDecision,
-      trust.policyCanaryGovernance.rolloutDecision
-    );
-    assert.equal(
-      trustEndpoint.payload.trustInterventions[0].crossMarketCollusionInterdiction.interdictionBand,
-      trust.crossMarketCollusionInterdiction.interdictionBand
-    );
-    assert.equal(
-      trustEndpoint.payload.trustInterventions[0].policyBlastRadiusSimulation.gateDecision,
-      trust.policyBlastRadiusSimulation.gateDecision
-    );
-    assert.equal(
-      trustEndpoint.payload.trustInterventions[0].escrowIntegrityAttestations.finalChainHash,
-      trust.escrowIntegrityAttestations.finalChainHash
-    );
-  });
-});
-
-test("trust operations v15 computes multi-hop fraud ring metrics", async () => {
-  await withTestServer({}, async ({ requestJson, registerUser }) => {
-    const admin = await registerUser({
-      userId: "admin-trust-v15-multihop",
-      email: "admin-trust-v15-multihop@example.com",
-      password: "admin-password",
-      role: "admin"
-    });
-    const sellerA = await registerUser({
-      userId: "seller-v15-multihop-a",
-      email: "seller-v15-multihop-a@example.com",
-      password: "seller-password",
-      role: "seller"
-    });
-    const sellerC = await registerUser({
-      userId: "seller-v15-multihop-c",
-      email: "seller-v15-multihop-c@example.com",
-      password: "seller-password",
-      role: "seller"
-    });
-    const buyerA = await registerUser({
-      userId: "buyer-v15-multihop-a",
-      email: "buyer-v15-multihop-a@example.com",
-      password: "buyer-password",
-      role: "buyer"
-    });
-    const buyerB = await registerUser({
-      userId: "buyer-v15-multihop-b",
-      email: "buyer-v15-multihop-b@example.com",
-      password: "buyer-password",
-      role: "buyer"
-    });
-    const buyerD = await registerUser({
-      userId: "buyer-v15-multihop-d",
-      email: "buyer-v15-multihop-d@example.com",
-      password: "buyer-password",
-      role: "buyer"
-    });
-
-    assert.equal(
-      (
-        await requestJson(
-          "POST",
-          "/listings",
-          {
-            listingId: "listing-v15-multihop-a",
-            title: "Target listing",
-            description: "seed",
-            priceCents: 24000,
-            localArea: "Metro-MultiHop"
-          },
-          sellerA.token
-        )
-      ).response.status,
-      201
-    );
-    assert.equal(
-      (
-        await requestJson(
-          "POST",
-          "/listings",
-          {
-            listingId: "listing-v15-multihop-c",
-            title: "Bridge listing",
-            description: "seed",
-            priceCents: 26000,
-            localArea: "Metro-MultiHop"
-          },
-          sellerC.token
-        )
-      ).response.status,
-      201
-    );
-
-    assert.equal(
-      (
-        await requestJson(
-          "POST",
-          "/transactions",
-          {
-            transactionId: "txn-v15-multihop-target",
-            buyerId: buyerA.user.id,
-            amountCents: 22000,
-            deviceFingerprint: "device-v15-target",
-            paymentFingerprint: "payment-v15-target"
-          },
-          sellerA.token
-        )
-      ).response.status,
-      201
-    );
-    assert.equal(
-      (
-        await requestJson(
-          "POST",
-          "/transactions",
-          {
-            transactionId: "txn-v15-multihop-hop1",
-            buyerId: buyerB.user.id,
-            amountCents: 21000,
-            deviceFingerprint: "device-v15-hop1",
-            paymentFingerprint: "payment-v15-hop1"
-          },
-          sellerA.token
-        )
-      ).response.status,
-      201
-    );
-    assert.equal(
-      (
-        await requestJson(
-          "POST",
-          "/transactions",
-          {
-            transactionId: "txn-v15-multihop-hop2",
-            buyerId: buyerB.user.id,
-            amountCents: 23000,
-            deviceFingerprint: "device-v15-hop2",
-            paymentFingerprint: "payment-v15-hop2"
-          },
-          sellerC.token
-        )
-      ).response.status,
-      201
-    );
-    assert.equal(
-      (
-        await requestJson(
-          "POST",
-          "/transactions",
-          {
-            transactionId: "txn-v15-multihop-hop3",
-            buyerId: buyerD.user.id,
-            amountCents: 25000,
-            deviceFingerprint: "device-v15-hop3",
-            paymentFingerprint: "payment-v15-hop3"
-          },
-          sellerC.token
-        )
-      ).response.status,
-      201
-    );
-
-    const reevaluated = await requestJson(
-      "POST",
-      "/transactions/txn-v15-multihop-target/trust/evaluate",
-      { evaluatedBy: admin.user.id },
-      admin.token
-    );
-    assert.equal(reevaluated.response.status, 200);
-
-    const trust = reevaluated.payload.trustAssessment;
-    assert.ok(trust.fraudRingDisruption.ringMetrics.linkedTransactionCount >= 3);
-    assert.ok(trust.fraudRingDisruption.ringMetrics.hopDistribution.hop2 >= 1);
-    assert.ok(trust.fraudRingDisruption.ringMetrics.hopDistribution.hop3 >= 1);
-    assert.ok(
-      trust.fraudRingDisruption.recommendedActions.includes("ring_entity_quarantine")
-    );
-  });
-});
-
-test("trust operations v15 flags post-incident regression and can trigger rollback", async () => {
-  await withTestServer({}, async ({ requestJson, registerUser }) => {
-    const admin = await registerUser({
-      userId: "admin-trust-v14",
-      email: "admin-trust-v14@example.com",
-      password: "admin-password",
-      role: "admin"
-    });
-    const seller = await registerUser({
-      userId: "seller-trust-v14-regression",
-      email: "seller-trust-v14-regression@example.com",
-      password: "seller-password",
-      role: "seller"
-    });
-
-    const listing = await requestJson(
-      "POST",
-      "/listings",
-      {
-        listingId: "listing-trust-v14-regression",
-        title: "Tablet",
-        description: "seed listing",
-        priceCents: 55000,
-        localArea: "Metro-Regress"
-      },
-      seller.token
-    );
-    assert.equal(listing.response.status, 201);
-
-    for (let index = 1; index <= 8; index += 1) {
-      const seedBuyer = await registerUser({
-        userId: `buyer-trust-v14-regression-${index}`,
-        email: `buyer-trust-v14-regression-${index}@example.com`,
-        password: "buyer-password",
-        role: "buyer"
+      const admin = await registerUser({
+        userId: "admin-webhook-1",
+        email: "admin-webhook-1@example.com",
+        password: "admin-password",
+        role: "admin"
       });
 
-      const seededTransaction = await requestJson(
+      const createTransaction = await requestJson(
         "POST",
         "/transactions",
         {
-          transactionId: `txn-trust-v14-regression-seed-${index}`,
-          buyerId: seedBuyer.user.id,
-          amountCents: 72000,
-          deviceFingerprint: `device-v14-regression-${index}`,
-          paymentFingerprint: `payment-v14-regression-${index}`
+          transactionId: "txn-webhook-1",
+          buyerId: buyer.user.id,
+          amountCents: 19000
         },
         seller.token
       );
-      assert.equal(seededTransaction.response.status, 201);
+      assert.equal(createTransaction.response.status, 201);
 
-      const opened = await requestJson(
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const succeededEvent = {
+        id: "evt_dedupe_succeeded_1",
+        type: "payment_intent.succeeded",
+        created: nowSeconds - 10,
+        data: {
+          object: {
+            id: "pi_dedupe_1",
+            metadata: {
+              transaction_id: "txn-webhook-1"
+            }
+          }
+        }
+      };
+      const succeededBody = JSON.stringify(succeededEvent);
+      const succeededSig = signStripePayload({
+        body: succeededBody,
+        secret: process.env.STRIPE_WEBHOOK_SECRET,
+        timestamp: nowSeconds
+      });
+
+      const firstDelivery = await requestRawJson("POST", "/webhooks/stripe", succeededBody, {
+        "content-type": "application/json",
+        "stripe-signature": succeededSig
+      });
+      assert.equal(firstDelivery.response.status, 200);
+      assert.equal(firstDelivery.payload.result.applied, true);
+
+      const duplicateDelivery = await requestRawJson("POST", "/webhooks/stripe", succeededBody, {
+        "content-type": "application/json",
+        "stripe-signature": succeededSig
+      });
+      assert.equal(duplicateDelivery.response.status, 200);
+      assert.equal(duplicateDelivery.payload.result.applied, false);
+      assert.equal(duplicateDelivery.payload.result.reason, "duplicate_delivery");
+
+      const failedEvent = {
+        id: "evt_failed_newer_1",
+        type: "payment_intent.payment_failed",
+        created: nowSeconds + 2,
+        data: {
+          object: {
+            id: "pi_dedupe_1",
+            metadata: {
+              transaction_id: "txn-webhook-1"
+            }
+          }
+        }
+      };
+      const failedBody = JSON.stringify(failedEvent);
+      const failedSig = signStripePayload({
+        body: failedBody,
+        secret: process.env.STRIPE_WEBHOOK_SECRET,
+        timestamp: nowSeconds
+      });
+      const failedDelivery = await requestRawJson("POST", "/webhooks/stripe", failedBody, {
+        "content-type": "application/json",
+        "stripe-signature": failedSig
+      });
+      assert.equal(failedDelivery.response.status, 200);
+      assert.equal(failedDelivery.payload.result.applied, true);
+      assert.equal(failedDelivery.payload.result.paymentStatus, "failed");
+
+      const oldSucceededEvent = {
+        id: "evt_succeeded_older_1",
+        type: "payment_intent.succeeded",
+        created: nowSeconds - 120,
+        data: {
+          object: {
+            id: "pi_dedupe_1",
+            metadata: {
+              transaction_id: "txn-webhook-1"
+            }
+          }
+        }
+      };
+      const oldSucceededBody = JSON.stringify(oldSucceededEvent);
+      const oldSucceededSig = signStripePayload({
+        body: oldSucceededBody,
+        secret: process.env.STRIPE_WEBHOOK_SECRET,
+        timestamp: nowSeconds
+      });
+      const outOfOrderDelivery = await requestRawJson(
         "POST",
-        `/transactions/txn-trust-v14-regression-seed-${index}/disputes`,
-        {},
-        seedBuyer.token
+        "/webhooks/stripe",
+        oldSucceededBody,
+        {
+          "content-type": "application/json",
+          "stripe-signature": oldSucceededSig
+        }
       );
-      assert.equal(opened.response.status, 200);
+      assert.equal(outOfOrderDelivery.response.status, 200);
+      assert.equal(outOfOrderDelivery.payload.result.applied, false);
+      assert.equal(outOfOrderDelivery.payload.result.reason, "out_of_order_ignored");
 
-      const adjudicated = await requestJson(
-        "POST",
-        `/transactions/txn-trust-v14-regression-seed-${index}/disputes/adjudicate`,
-        { decision: "refund_to_buyer", notes: "regression-seed adverse outcome" },
+      const transactionAfterOutOfOrder = await requestJson(
+        "GET",
+        "/transactions/txn-webhook-1",
+        undefined,
         admin.token
       );
-      assert.equal(adjudicated.response.status, 200);
-    }
+      assert.equal(transactionAfterOutOfOrder.response.status, 200);
+      assert.equal(transactionAfterOutOfOrder.payload.transaction.paymentStatus, "failed");
+      assert.ok("itemPrice" in transactionAfterOutOfOrder.payload.transaction);
+      assert.ok("serviceFee" in transactionAfterOutOfOrder.payload.transaction);
+      assert.ok("totalBuyerCharge" in transactionAfterOutOfOrder.payload.transaction);
+      assert.ok("sellerNet" in transactionAfterOutOfOrder.payload.transaction);
 
-    const targetBuyer = await registerUser({
-      userId: "buyer-trust-v14-regression-target",
-      email: "buyer-trust-v14-regression-target@example.com",
-      password: "buyer-password",
-      role: "buyer"
+      const db = new Database(databasePath);
+      db.prepare("UPDATE transactions SET payment_status = 'captured' WHERE id = ?").run("txn-webhook-1");
+      db.close();
+
+      const reconcile = await requestJson(
+        "POST",
+        "/jobs/payment-reconciliation",
+        { limit: 20 },
+        admin.token
+      );
+      assert.equal(reconcile.response.status, 200);
+      assert.equal(reconcile.payload.correctedCount, 1);
+      assert.equal(reconcile.payload.corrections[0].transactionId, "txn-webhook-1");
+      assert.equal(reconcile.payload.corrections[0].correctedPaymentStatus, "failed");
     });
+  } finally {
+    process.env.STRIPE_WEBHOOK_SECRET = previousSecret;
+    process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS = previousTolerance;
+  }
+});
 
-    const target = await requestJson(
-      "POST",
-      "/transactions",
-      {
-        transactionId: "txn-trust-v14-regression-target",
-        buyerId: targetBuyer.user.id,
-        amountCents: 78000,
-        deviceFingerprint: "device-v14-regression-target",
-        paymentFingerprint: "payment-v14-regression-target"
-      },
-      seller.token
-    );
-    assert.equal(target.response.status, 201);
+test("admin can inspect and reprocess failed webhook events safely", async () => {
+  const previousSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  const previousTolerance = process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS;
+  process.env.STRIPE_WEBHOOK_SECRET = "whsec_test_reprocess";
+  process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS = "300";
 
-    const trust = target.payload.trustAssessment;
-    assert.equal(trust.postIncidentVerification.regressionDetected, true);
-    assert.equal(trust.postIncidentVerification.controlStatus, "degraded");
-    assert.ok(
-      trust.postIncidentVerification.alerts.includes("policy_regression_detected")
-    );
-    assert.ok(
-      trust.reasonCodes.includes("post_incident_control_regression_detected")
-    );
-    assert.equal(trust.trustPolicyRollback.rollbackTriggered, true);
-    assert.ok(
-      trust.reasonCodes.includes("autonomous_trust_policy_rollback_triggered")
-    );
-    assert.ok(
-      trust.intervention.recommendedControls.includes("autonomous_policy_rollback")
-    );
-    assert.equal(trust.policyCanaryGovernance.rolloutDecision, "revert");
-    assert.equal(trust.policyCanaryGovernance.autoReverted, true);
-    assert.equal(trust.policyBlastRadiusSimulation.gateDecision, "block");
-    assert.ok(trust.reasonCodes.includes("policy_blast_radius_gate_blocked"));
-  });
+  try {
+    await withTestServer({}, async ({ requestJson, requestRawJson, registerUser }) => {
+      const seller = await registerUser({
+        userId: "seller-webhook-reprocess-1",
+        email: "seller-webhook-reprocess-1@example.com",
+        password: "seller-password",
+        role: "seller"
+      });
+      const buyer = await registerUser({
+        userId: "buyer-webhook-reprocess-1",
+        email: "buyer-webhook-reprocess-1@example.com",
+        password: "buyer-password",
+        role: "buyer"
+      });
+      const admin = await registerUser({
+        userId: "admin-webhook-reprocess-1",
+        email: "admin-webhook-reprocess-1@example.com",
+        password: "admin-password",
+        role: "admin"
+      });
+
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const event = {
+        id: "evt_needs_reprocess_1",
+        type: "payment_intent.succeeded",
+        created: nowSeconds,
+        data: {
+          object: {
+            id: "pi_reprocess_1",
+            metadata: {
+              transaction_id: "txn-reprocess-1"
+            }
+          }
+        }
+      };
+      const body = JSON.stringify(event);
+      const signature = signStripePayload({
+        body,
+        secret: process.env.STRIPE_WEBHOOK_SECRET,
+        timestamp: nowSeconds
+      });
+
+      const firstAttempt = await requestRawJson("POST", "/webhooks/stripe", body, {
+        "content-type": "application/json",
+        "stripe-signature": signature
+      });
+      assert.equal(firstAttempt.response.status, 200);
+      assert.equal(firstAttempt.payload.result.reason, "transaction_not_found");
+
+      const createTransaction = await requestJson(
+        "POST",
+        "/transactions",
+        {
+          transactionId: "txn-reprocess-1",
+          buyerId: buyer.user.id,
+          amountCents: 17500
+        },
+        seller.token
+      );
+      assert.equal(createTransaction.response.status, 201);
+
+      const failedList = await requestJson(
+        "GET",
+        "/admin/payment-webhooks?status=failed&provider=stripe",
+        undefined,
+        admin.token
+      );
+      assert.equal(failedList.response.status, 200);
+      const failedEvent = failedList.payload.events.find((entry) => entry.eventId === "evt_needs_reprocess_1");
+      assert.ok(failedEvent);
+
+      const replay = await requestJson(
+        "POST",
+        `/admin/payment-webhooks/${failedEvent.id}/reprocess`,
+        {},
+        admin.token
+      );
+      assert.equal(replay.response.status, 200);
+      assert.equal(replay.payload.result.reason, "applied");
+      assert.equal(replay.payload.result.transactionId, "txn-reprocess-1");
+    });
+  } finally {
+    process.env.STRIPE_WEBHOOK_SECRET = previousSecret;
+    process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS = previousTolerance;
+  }
 });

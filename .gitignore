@@ -1,5 +1,8 @@
 node_modules/
 .DS_Store
 .env
+.env.staging
+.env.production
 npm-debug.log*
 data/
+.deploy-state/

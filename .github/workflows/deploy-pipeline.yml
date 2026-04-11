@@ -1,0 +1,120 @@
+name: Deployment Pipeline
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-pipeline
+  cancel-in-progress: false
+
+jobs:
+  release-gate:
+    name: Release Gate Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run test gate
+        run: npm test
+
+  deploy-staging:
+    name: Deploy Staging
+    runs-on: ubuntu-latest
+    needs: release-gate
+    environment: staging
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate staging configuration
+        run: node scripts/deploy/validate-deploy-config.js --env staging
+        env:
+          STAGING_BASE_URL: ${{ secrets.STAGING_BASE_URL }}
+          STAGING_DATABASE_PATH: ${{ secrets.STAGING_DATABASE_PATH }}
+          STAGING_AUTH_TOKEN_SECRET: ${{ secrets.STAGING_AUTH_TOKEN_SECRET }}
+          STAGING_STRIPE_WEBHOOK_SECRET: ${{ secrets.STAGING_STRIPE_WEBHOOK_SECRET }}
+          STAGING_DEPLOY_COMMAND: ${{ secrets.STAGING_DEPLOY_COMMAND }}
+          STAGING_ROLLBACK_COMMAND: ${{ secrets.STAGING_ROLLBACK_COMMAND }}
+
+      - name: Deploy staging
+        run: node scripts/deploy/run-deploy.js --env staging
+        env:
+          STAGING_BASE_URL: ${{ secrets.STAGING_BASE_URL }}
+          STAGING_DATABASE_PATH: ${{ secrets.STAGING_DATABASE_PATH }}
+          STAGING_AUTH_TOKEN_SECRET: ${{ secrets.STAGING_AUTH_TOKEN_SECRET }}
+          STAGING_STRIPE_WEBHOOK_SECRET: ${{ secrets.STAGING_STRIPE_WEBHOOK_SECRET }}
+          STAGING_DEPLOY_COMMAND: ${{ secrets.STAGING_DEPLOY_COMMAND }}
+          STAGING_ROLLBACK_COMMAND: ${{ secrets.STAGING_ROLLBACK_COMMAND }}
+
+      - name: Upload staging deploy state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-deploy-state
+          path: .deploy-state
+          if-no-files-found: ignore
+
+  deploy-production:
+    name: Deploy Production
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate production configuration
+        run: node scripts/deploy/validate-deploy-config.js --env production
+        env:
+          PRODUCTION_BASE_URL: ${{ secrets.PRODUCTION_BASE_URL }}
+          PRODUCTION_DATABASE_PATH: ${{ secrets.PRODUCTION_DATABASE_PATH }}
+          PRODUCTION_AUTH_TOKEN_SECRET: ${{ secrets.PRODUCTION_AUTH_TOKEN_SECRET }}
+          PRODUCTION_STRIPE_WEBHOOK_SECRET: ${{ secrets.PRODUCTION_STRIPE_WEBHOOK_SECRET }}
+          PRODUCTION_DEPLOY_COMMAND: ${{ secrets.PRODUCTION_DEPLOY_COMMAND }}
+          PRODUCTION_ROLLBACK_COMMAND: ${{ secrets.PRODUCTION_ROLLBACK_COMMAND }}
+
+      - name: Deploy production
+        run: node scripts/deploy/run-deploy.js --env production
+        env:
+          PRODUCTION_BASE_URL: ${{ secrets.PRODUCTION_BASE_URL }}
+          PRODUCTION_DATABASE_PATH: ${{ secrets.PRODUCTION_DATABASE_PATH }}
+          PRODUCTION_AUTH_TOKEN_SECRET: ${{ secrets.PRODUCTION_AUTH_TOKEN_SECRET }}
+          PRODUCTION_STRIPE_WEBHOOK_SECRET: ${{ secrets.PRODUCTION_STRIPE_WEBHOOK_SECRET }}
+          PRODUCTION_DEPLOY_COMMAND: ${{ secrets.PRODUCTION_DEPLOY_COMMAND }}
+          PRODUCTION_ROLLBACK_COMMAND: ${{ secrets.PRODUCTION_ROLLBACK_COMMAND }}
+
+      - name: Upload production deploy state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-deploy-state
+          path: .deploy-state
+          if-no-files-found: ignore

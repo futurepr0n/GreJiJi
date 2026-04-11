@@ -283,7 +283,7 @@ export function renderDocsPage() {
             <h2 id="routes-title">Route map</h2>
             <details open>
               <summary>Listings</summary>
-              <p><code>GET /listings</code> is public. Listing creation and updates are seller-only and validate <code>title</code>, <code>localArea</code>, and a positive integer <code>priceCents</code>.</p>
+              <p><code>GET /listings</code> is public. Listing creation and updates are seller-only and validate <code>title</code>, <code>localArea</code>, and a positive integer <code>priceCents</code>. Listings support external <code>photoUrls</code> and uploaded photos via <code>POST /listings/:id/photos</code>.</p>
             </details>
             <details>
               <summary>Transactions</summary>

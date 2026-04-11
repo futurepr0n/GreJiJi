@@ -193,6 +193,38 @@ button.ghost {
   font-size: 0.85rem;
 }
 
+.stack-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+
+.status {
+  min-height: 1.2em;
+}
+
+.subtle-box {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--muted);
+}
+
+details {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: #fff;
+}
+
+summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
 .log {
   background: #10151f;
   color: #c6ffd7;

@@ -11,8 +11,22 @@
     "better-sqlite3": "^11.9.1"
   },
   "scripts": {
+    "migrate": "node scripts/migrate.js",
+    "deploy:validate:staging": "node scripts/deploy/validate-deploy-config.js --env staging",
+    "deploy:validate:production": "node scripts/deploy/validate-deploy-config.js --env production",
+    "deploy:migration-preflight": "node scripts/deploy/migration-preflight.js",
+    "deploy:smoke": "node scripts/deploy/synthetic-smoke.js",
+    "deploy:staging": "node scripts/deploy/run-deploy.js --env staging",
+    "deploy:production": "node scripts/deploy/run-deploy.js --env production",
+    "deploy:rollback:staging": "node scripts/deploy/run-rollback.js --env staging",
+    "deploy:rollback:production": "node scripts/deploy/run-rollback.js --env production",
     "start": "node src/server.js",
+    "start:prod": "sh ./scripts/start-with-migrations.sh",
     "dev": "PORT=3000 node src/server.js",
-    "test": "node --test"
+    "test": "npm run test:unit && npm run test:integration && npm run test:e2e",
+    "test:unit": "node --test test/unit/*.test.js",
+    "test:integration": "node --test test/integration/*.test.js",
+    "test:e2e": "node --test test/smoke.test.js",
+    "test:load": "node scripts/load/performance-scenario.js"
   }
 }
