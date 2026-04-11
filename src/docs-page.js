@@ -201,6 +201,10 @@ export function renderDocsPage() {
             <strong>Bearer auth</strong>
             <span>Signed HMAC tokens</span>
           </div>
+          <div class="metric">
+            <strong>Trust ops v16</strong>
+            <span>Containment, stress controls, canary governance</span>
+          </div>
         </div>
       </header>
 
@@ -212,6 +216,7 @@ export function renderDocsPage() {
             <li><a href="#auth">Auth and roles</a></li>
             <li><a href="#routes">Route map</a></li>
             <li><a href="#workflow">Settlement workflow</a></li>
+            <li><a href="#trust">Trust operations v16</a></li>
             <li><a href="#audit">Audit trail and notifications</a></li>
             <li><a href="#operations">Operations</a></li>
           </ol>
@@ -245,7 +250,7 @@ export function renderDocsPage() {
                 </tr>
                 <tr>
                   <td>Transactions</td>
-                  <td><code>POST /transactions</code>, <code>GET /transactions/:id</code>, <code>GET /transactions/:id/events</code></td>
+                  <td><code>POST /transactions</code>, <code>GET /transactions/:id</code>, <code>GET /transactions/:id/events</code>, <code>GET /transactions/:id/trust</code></td>
                 </tr>
                 <tr>
                   <td>Disputes</td>
@@ -282,11 +287,15 @@ export function renderDocsPage() {
             </details>
             <details>
               <summary>Transactions</summary>
-              <p><code>POST /transactions</code> creates an accepted transaction, computes <code>autoReleaseDueAt</code>, appends <code>payment_captured</code>, and queues notification outbox rows.</p>
+              <p><code>POST /transactions</code> creates an accepted transaction, computes <code>autoReleaseDueAt</code>, appends <code>payment_captured</code>, queues notification outbox rows, and persists a current <code>trustAssessment</code>.</p>
             </details>
             <details>
               <summary>Disputes and settlement</summary>
               <p>Participants can open disputes. Admins can resolve back to <code>accepted</code> or adjudicate to seller release, buyer refund, or cancellation.</p>
+            </details>
+            <details>
+              <summary>Trust assessments</summary>
+              <p><code>GET /transactions/:id/trust</code> returns the latest assessment and intervention history. <code>POST /transactions/:id/trust/evaluate</code> is admin-only and appends a fresh v16 evaluation snapshot.</p>
             </details>
             <details>
               <summary>Notification dispatch and inbox</summary>
@@ -308,6 +317,29 @@ export function renderDocsPage() {
             </div>
           </section>
 
+          <section id="trust" aria-labelledby="trust-title">
+            <h2 id="trust-title">Trust operations v16</h2>
+            <p>
+              The current trust engine persists <code>trust-ops-v16</code> assessments with linked-entity containment,
+              settlement stress scenarios, and canary rollout governance.
+            </p>
+            <details open>
+              <summary>Account takeover containment</summary>
+              <p>Correlates shared device and payment-fingerprint transitions, then returns a <code>containmentBand</code>, <code>containmentMode</code>, and investigator evidence trail before operators freeze linked accounts.</p>
+            </details>
+            <details>
+              <summary>Settlement risk stress controls</summary>
+              <p>Simulates delayed delivery, reversal waves, and coordinated dispute bursts. Operators should inspect <code>maxScenarioSeverity</code> and <code>recommendedControls</code> before releasing high-risk funds.</p>
+            </details>
+            <details>
+              <summary>Policy canary governance</summary>
+              <p>Uses degradation pressure and rollback thresholds to choose <code>promote</code>, <code>hold</code>, or <code>revert</code>, with guarded cohort stages of 5%, 20%, and 100%.</p>
+            </details>
+            <div class="callout" role="note" aria-label="Trust route note">
+              Deep-dive route: <code>GET /transactions/:id/trust</code> returns both the latest assessment and historical interventions for audit review.
+            </div>
+          </section>
+
           <section id="audit" aria-labelledby="audit-title">
             <h2 id="audit-title">Audit trail and notifications</h2>
             <p>Lifecycle changes append immutable rows to <code>transaction_events</code> and enqueue <code>notification_outbox</code> records in the same logical transaction.</p>
@@ -323,11 +355,17 @@ export function renderDocsPage() {
           <section id="operations" aria-labelledby="operations-title">
             <h2 id="operations-title">Operations</h2>
             <p>Run the service locally with <code>npm start</code> and verify behavior with <code>npm test</code>.</p>
+            <div class="callout" role="note" aria-label="Operations note">
+              When trust rollout is under review, treat <code>policyCanaryGovernance.rolloutDecision = revert</code> as the canonical rollback signal and inspect the related intervention history before resuming rollout.
+            </div>
             <pre><code>curl -sS -X POST http://localhost:3000/jobs/notification-dispatch \
   -H "Authorization: Bearer &lt;admin-token&gt;" \
   -H "Content-Type: application/json" \
   -d '{"limit":100}'
+curl -sS http://localhost:3000/transactions/&lt;transaction-id&gt;/trust \
+  -H "Authorization: Bearer &lt;participant-or-admin-token&gt;"
 sqlite3 ./data/grejiji.sqlite "SELECT id, transaction_id, topic, status, attempt_count, next_retry_at FROM notification_outbox ORDER BY id;"
+sqlite3 ./data/grejiji.sqlite "SELECT transaction_id, orchestration_version, json_extract(policy_canary_governance_json, '$.rolloutDecision') FROM trust_assessments ORDER BY updated_at DESC;"
 sqlite3 ./data/grejiji.sqlite "SELECT id, recipient_user_id, topic, status, read_at, acknowledged_at FROM user_notifications ORDER BY id;"</code></pre>
           </section>
         </main>

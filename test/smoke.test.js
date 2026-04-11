@@ -1131,3 +1131,656 @@ test("notification dispatcher records retries and backoff metadata on failure", 
     }
   );
 });
+
+test("trust assessment is persisted and exposed through transaction and trust endpoints", async () => {
+  await withTestServer({}, async ({ requestJson, registerUser }) => {
+    const seller = await registerUser({
+      userId: "seller-trust-1",
+      email: "seller-trust-1@example.com",
+      password: "seller-password",
+      role: "seller"
+    });
+    const buyer = await registerUser({
+      userId: "buyer-trust-1",
+      email: "buyer-trust-1@example.com",
+      password: "buyer-password",
+      role: "buyer"
+    });
+
+    const listing = await requestJson(
+      "POST",
+      "/listings",
+      {
+        listingId: "listing-trust-1",
+        title: "Camera",
+        description: "Mirrorless camera",
+        priceCents: 64000,
+        localArea: "Toronto-East"
+      },
+      seller.token
+    );
+    assert.equal(listing.response.status, 201);
+
+    const created = await requestJson(
+      "POST",
+      "/transactions",
+      {
+        transactionId: "txn-trust-1",
+        buyerId: buyer.user.id,
+        amountCents: 12000
+      },
+      seller.token
+    );
+    assert.equal(created.response.status, 201);
+    assert.ok(created.payload.trustAssessment);
+    assert.equal(created.payload.trustAssessment.transactionId, "txn-trust-1");
+    assert.match(created.payload.trustAssessment.riskBand, /low|medium|high/);
+    assert.ok(Array.isArray(created.payload.trustAssessment.reasonCodes));
+
+    const fetched = await requestJson("GET", "/transactions/txn-trust-1", undefined, buyer.token);
+    assert.equal(fetched.response.status, 200);
+    assert.equal(fetched.payload.trustAssessment.transactionId, "txn-trust-1");
+
+    const trust = await requestJson("GET", "/transactions/txn-trust-1/trust", undefined, buyer.token);
+    assert.equal(trust.response.status, 200);
+    assert.equal(trust.payload.transactionId, "txn-trust-1");
+    assert.ok(Array.isArray(trust.payload.trustInterventions));
+    assert.ok(trust.payload.trustInterventions.length >= 1);
+    assert.ok(trust.payload.trustInterventions[0].reasonCodes.length >= 1);
+  });
+});
+
+test("trust operations v12 returns deterministic low, medium, and high risk bands", async () => {
+  await withTestServer({}, async ({ requestJson, registerUser }) => {
+    const sellerLow = await registerUser({
+      userId: "seller-trust-low",
+      email: "seller-trust-low@example.com",
+      password: "seller-password",
+      role: "seller"
+    });
+    const buyerLow = await registerUser({
+      userId: "buyer-trust-low",
+      email: "buyer-trust-low@example.com",
+      password: "buyer-password",
+      role: "buyer"
+    });
+    const sellerMedium = await registerUser({
+      userId: "seller-trust-medium",
+      email: "seller-trust-medium@example.com",
+      password: "seller-password",
+      role: "seller"
+    });
+    const buyerMedium = await registerUser({
+      userId: "buyer-trust-medium",
+      email: "buyer-trust-medium@example.com",
+      password: "buyer-password",
+      role: "buyer"
+    });
+    const sellerHigh = await registerUser({
+      userId: "seller-trust-high",
+      email: "seller-trust-high@example.com",
+      password: "seller-password",
+      role: "seller"
+    });
+    const buyerHigh = await registerUser({
+      userId: "buyer-trust-high",
+      email: "buyer-trust-high@example.com",
+      password: "buyer-password",
+      role: "buyer"
+    });
+
+    const createListing = async (token, listingId, localArea) =>
+      requestJson(
+        "POST",
+        "/listings",
+        { listingId, title: listingId, description: "seed", priceCents: 50000, localArea },
+        token
+      );
+
+    assert.equal((await createListing(sellerLow.token, "listing-trust-low", "Calm-North")).response.status, 201);
+    assert.equal(
+      (await createListing(sellerMedium.token, "listing-trust-medium", "Metro-Mid")).response.status,
+      201
+    );
+    assert.equal((await createListing(sellerHigh.token, "listing-trust-high", "Metro-Risk")).response.status, 201);
+
+    const createTransaction = async (sellerToken, transactionId, buyerId, amountCents) =>
+      requestJson(
+        "POST",
+        "/transactions",
+        { transactionId, buyerId, amountCents },
+        sellerToken
+      );
+
+    const low = await createTransaction(
+      sellerLow.token,
+      "txn-trust-low-target",
+      buyerLow.user.id,
+      3000
+    );
+    assert.equal(low.response.status, 201);
+    assert.equal(low.payload.trustAssessment.riskBand, "low");
+    assert.ok(
+      low.payload.trustAssessment.intervention.recommendedControls.includes(
+        "session_risk_annotation"
+      )
+    );
+    assert.equal(low.payload.trustAssessment.policyCanaryGovernance.rolloutDecision, "promote");
+    assert.equal(low.payload.trustAssessment.policyBlastRadiusSimulation.gateDecision, "pass");
+    assert.equal(
+      low.payload.trustAssessment.crossMarketCollusionInterdiction.falsePositiveContainment
+        .maxAutomatedSuppressionMinutes,
+      0
+    );
+
+    for (let index = 1; index <= 3; index += 1) {
+      const seeded = await createTransaction(
+        sellerMedium.token,
+        `txn-trust-medium-seed-${index}`,
+        buyerMedium.user.id,
+        18000
+      );
+      assert.equal(seeded.response.status, 201);
+      if (index === 1) {
+        const opened = await requestJson(
+          "POST",
+          `/transactions/txn-trust-medium-seed-${index}/disputes`,
+          {},
+          buyerMedium.token
+        );
+        assert.equal(opened.response.status, 200);
+      }
+    }
+
+    const medium = await createTransaction(
+      sellerMedium.token,
+      "txn-trust-medium-target",
+      buyerMedium.user.id,
+      30000
+    );
+    assert.equal(medium.response.status, 201);
+    assert.equal(medium.payload.trustAssessment.riskBand, "medium");
+    assert.ok(
+      medium.payload.trustAssessment.intervention.recommendedControls.includes(
+        "step_up_verification"
+      )
+    );
+    assert.match(
+      medium.payload.trustAssessment.policyBlastRadiusSimulation.gateDecision,
+      /review|block/
+    );
+
+    const highSeedBuyers = [];
+    for (let index = 1; index <= 4; index += 1) {
+      const seededBuyer = await registerUser({
+        userId: `buyer-trust-high-seed-${index}`,
+        email: `buyer-trust-high-seed-${index}@example.com`,
+        password: "buyer-password",
+        role: "buyer"
+      });
+      highSeedBuyers.push(seededBuyer);
+    }
+
+    for (let index = 0; index < highSeedBuyers.length; index += 1) {
+      const buyer = highSeedBuyers[index];
+      const seeded = await createTransaction(
+        sellerHigh.token,
+        `txn-trust-high-seed-${index + 1}`,
+        buyer.user.id,
+        95000
+      );
+      assert.equal(seeded.response.status, 201);
+      const opened = await requestJson(
+        "POST",
+        `/transactions/txn-trust-high-seed-${index + 1}/disputes`,
+        {},
+        buyer.token
+      );
+      assert.equal(opened.response.status, 200);
+    }
+
+    const high = await createTransaction(
+      sellerHigh.token,
+      "txn-trust-high-target",
+      buyerHigh.user.id,
+      120000
+    );
+    assert.equal(high.response.status, 201);
+    assert.equal(high.payload.trustAssessment.riskBand, "high");
+    assert.ok(
+      high.payload.trustAssessment.intervention.recommendedControls.includes("temporary_hold")
+    );
+    assert.ok(high.payload.trustAssessment.reasonCodes.includes("geo_cluster_dispute_density_high"));
+    assert.match(
+      high.payload.trustAssessment.policyBlastRadiusSimulation.gateDecision,
+      /review|block/
+    );
+  });
+});
+
+test("trust operations v17 persists collusion interdiction, escrow attestations, and blast-radius simulation metadata", async () => {
+  await withTestServer({}, async ({ requestJson, registerUser }) => {
+    const seller = await registerUser({
+      userId: "seller-trust-v13",
+      email: "seller-trust-v13@example.com",
+      password: "seller-password",
+      role: "seller"
+    });
+    const buyerA = await registerUser({
+      userId: "buyer-trust-v13-a",
+      email: "buyer-trust-v13-a@example.com",
+      password: "buyer-password",
+      role: "buyer"
+    });
+    const buyerB = await registerUser({
+      userId: "buyer-trust-v13-b",
+      email: "buyer-trust-v13-b@example.com",
+      password: "buyer-password",
+      role: "buyer"
+    });
+
+    const listing = await requestJson(
+      "POST",
+      "/listings",
+      {
+        listingId: "listing-trust-v13",
+        title: "Monitor",
+        description: "4k monitor",
+        priceCents: 40000,
+        localArea: "Metro-Cluster"
+      },
+      seller.token
+    );
+    assert.equal(listing.response.status, 201);
+
+    const seeded = await requestJson(
+      "POST",
+      "/transactions",
+      {
+        transactionId: "txn-trust-v13-seed",
+        buyerId: buyerA.user.id,
+        amountCents: 15000,
+        deviceFingerprint: "device-v13-shared",
+        paymentFingerprint: "payment-v13-shared"
+      },
+      seller.token
+    );
+    assert.equal(seeded.response.status, 201);
+
+    const target = await requestJson(
+      "POST",
+      "/transactions",
+      {
+        transactionId: "txn-trust-v13-target",
+        buyerId: buyerB.user.id,
+        amountCents: 22000,
+        deviceFingerprint: "device-v13-shared",
+        paymentFingerprint: "payment-v13-shared"
+      },
+      seller.token
+    );
+    assert.equal(target.response.status, 201);
+
+    const trust = target.payload.trustAssessment;
+    assert.equal(trust.orchestrationVersion, "trust-ops-v17");
+    assert.ok(trust.graphSignals.linkedTransactionCount >= 1);
+    assert.ok(trust.graphSignals.entityTypeCounts.device >= 1);
+    assert.ok(trust.graphSignals.entityTypeCounts.paymentFingerprint >= 1);
+    assert.ok(Array.isArray(trust.explainability.topRiskPaths));
+    assert.ok(trust.explainability.topRiskPaths.length >= 1);
+    assert.ok(Array.isArray(trust.identityFriction.requirements));
+    assert.equal(typeof trust.postIncidentVerification.regressionDetected, "boolean");
+    assert.equal(typeof trust.fraudRingDisruption.disruptionScore, "number");
+    assert.ok(Array.isArray(trust.fraudRingDisruption.recommendedActions));
+    assert.equal(typeof trust.escrowAdversarialSimulation.maxSeverity, "number");
+    assert.ok(Array.isArray(trust.escrowAdversarialSimulation.scenarioOutcomes));
+    assert.equal(typeof trust.trustPolicyRollback.rollbackTriggered, "boolean");
+    assert.equal(typeof trust.accountTakeoverContainment.correlationScore, "number");
+    assert.ok(Array.isArray(trust.accountTakeoverContainment.recommendedActions));
+    assert.equal(typeof trust.settlementRiskStressControls.maxScenarioSeverity, "number");
+    assert.ok(Array.isArray(trust.settlementRiskStressControls.stressScenarios));
+    assert.equal(typeof trust.crossMarketCollusionInterdiction.collusionRiskScore, "number");
+    assert.ok(Array.isArray(trust.crossMarketCollusionInterdiction.graduatedInterventions));
+    assert.equal(
+      trust.crossMarketCollusionInterdiction.falsePositiveContainment.allowCounterpartyRecoveryPath,
+      true
+    );
+    assert.equal(typeof trust.escrowIntegrityAttestations.attestationStatus, "string");
+    assert.match(trust.escrowIntegrityAttestations.finalChainHash, /^[a-f0-9]{64}$/);
+    assert.ok(Array.isArray(trust.escrowIntegrityAttestations.tamperEvidentChain));
+    assert.ok(trust.escrowIntegrityAttestations.tamperEvidentChain.length >= 4);
+    assert.match(
+      trust.policyBlastRadiusSimulation.gateDecision,
+      /pass|review|block/
+    );
+    assert.match(
+      trust.policyCanaryGovernance.rolloutDecision,
+      /promote|hold|revert/
+    );
+    assert.match(trust.evidenceProvenance.snapshotId, /^trust-signal-txn-trust-v13-target-/);
+    assert.match(trust.evidenceProvenance.snapshotHash, /^[a-f0-9]{64}$/);
+    assert.ok(trust.outcomeFeedback.thresholdModel.medium >= 20);
+    assert.ok(trust.outcomeFeedback.thresholdModel.high <= 85);
+    assert.ok(
+      trust.outcomeFeedback.thresholdModel.high >= trust.outcomeFeedback.thresholdModel.medium + 15
+    );
+
+    const trustEndpoint = await requestJson(
+      "GET",
+      "/transactions/txn-trust-v13-target/trust",
+      undefined,
+      buyerB.token
+    );
+    assert.equal(trustEndpoint.response.status, 200);
+    assert.ok(trustEndpoint.payload.trustInterventions.length >= 1);
+    assert.equal(
+      trustEndpoint.payload.trustInterventions[0].provenanceRef,
+      trust.evidenceProvenance.snapshotId
+    );
+    assert.deepEqual(
+      trustEndpoint.payload.trustInterventions[0].identityFriction.requirements,
+      trust.identityFriction.requirements
+    );
+    assert.equal(
+      trustEndpoint.payload.trustInterventions[0].fraudRingDisruption.disruptionScore,
+      trust.fraudRingDisruption.disruptionScore
+    );
+    assert.equal(
+      trustEndpoint.payload.trustInterventions[0].trustPolicyRollback.rollbackTriggered,
+      trust.trustPolicyRollback.rollbackTriggered
+    );
+    assert.equal(
+      trustEndpoint.payload.trustInterventions[0].accountTakeoverContainment.correlationScore,
+      trust.accountTakeoverContainment.correlationScore
+    );
+    assert.equal(
+      trustEndpoint.payload.trustInterventions[0].policyCanaryGovernance.rolloutDecision,
+      trust.policyCanaryGovernance.rolloutDecision
+    );
+    assert.equal(
+      trustEndpoint.payload.trustInterventions[0].crossMarketCollusionInterdiction.interdictionBand,
+      trust.crossMarketCollusionInterdiction.interdictionBand
+    );
+    assert.equal(
+      trustEndpoint.payload.trustInterventions[0].policyBlastRadiusSimulation.gateDecision,
+      trust.policyBlastRadiusSimulation.gateDecision
+    );
+    assert.equal(
+      trustEndpoint.payload.trustInterventions[0].escrowIntegrityAttestations.finalChainHash,
+      trust.escrowIntegrityAttestations.finalChainHash
+    );
+  });
+});
+
+test("trust operations v15 computes multi-hop fraud ring metrics", async () => {
+  await withTestServer({}, async ({ requestJson, registerUser }) => {
+    const admin = await registerUser({
+      userId: "admin-trust-v15-multihop",
+      email: "admin-trust-v15-multihop@example.com",
+      password: "admin-password",
+      role: "admin"
+    });
+    const sellerA = await registerUser({
+      userId: "seller-v15-multihop-a",
+      email: "seller-v15-multihop-a@example.com",
+      password: "seller-password",
+      role: "seller"
+    });
+    const sellerC = await registerUser({
+      userId: "seller-v15-multihop-c",
+      email: "seller-v15-multihop-c@example.com",
+      password: "seller-password",
+      role: "seller"
+    });
+    const buyerA = await registerUser({
+      userId: "buyer-v15-multihop-a",
+      email: "buyer-v15-multihop-a@example.com",
+      password: "buyer-password",
+      role: "buyer"
+    });
+    const buyerB = await registerUser({
+      userId: "buyer-v15-multihop-b",
+      email: "buyer-v15-multihop-b@example.com",
+      password: "buyer-password",
+      role: "buyer"
+    });
+    const buyerD = await registerUser({
+      userId: "buyer-v15-multihop-d",
+      email: "buyer-v15-multihop-d@example.com",
+      password: "buyer-password",
+      role: "buyer"
+    });
+
+    assert.equal(
+      (
+        await requestJson(
+          "POST",
+          "/listings",
+          {
+            listingId: "listing-v15-multihop-a",
+            title: "Target listing",
+            description: "seed",
+            priceCents: 24000,
+            localArea: "Metro-MultiHop"
+          },
+          sellerA.token
+        )
+      ).response.status,
+      201
+    );
+    assert.equal(
+      (
+        await requestJson(
+          "POST",
+          "/listings",
+          {
+            listingId: "listing-v15-multihop-c",
+            title: "Bridge listing",
+            description: "seed",
+            priceCents: 26000,
+            localArea: "Metro-MultiHop"
+          },
+          sellerC.token
+        )
+      ).response.status,
+      201
+    );
+
+    assert.equal(
+      (
+        await requestJson(
+          "POST",
+          "/transactions",
+          {
+            transactionId: "txn-v15-multihop-target",
+            buyerId: buyerA.user.id,
+            amountCents: 22000,
+            deviceFingerprint: "device-v15-target",
+            paymentFingerprint: "payment-v15-target"
+          },
+          sellerA.token
+        )
+      ).response.status,
+      201
+    );
+    assert.equal(
+      (
+        await requestJson(
+          "POST",
+          "/transactions",
+          {
+            transactionId: "txn-v15-multihop-hop1",
+            buyerId: buyerB.user.id,
+            amountCents: 21000,
+            deviceFingerprint: "device-v15-hop1",
+            paymentFingerprint: "payment-v15-hop1"
+          },
+          sellerA.token
+        )
+      ).response.status,
+      201
+    );
+    assert.equal(
+      (
+        await requestJson(
+          "POST",
+          "/transactions",
+          {
+            transactionId: "txn-v15-multihop-hop2",
+            buyerId: buyerB.user.id,
+            amountCents: 23000,
+            deviceFingerprint: "device-v15-hop2",
+            paymentFingerprint: "payment-v15-hop2"
+          },
+          sellerC.token
+        )
+      ).response.status,
+      201
+    );
+    assert.equal(
+      (
+        await requestJson(
+          "POST",
+          "/transactions",
+          {
+            transactionId: "txn-v15-multihop-hop3",
+            buyerId: buyerD.user.id,
+            amountCents: 25000,
+            deviceFingerprint: "device-v15-hop3",
+            paymentFingerprint: "payment-v15-hop3"
+          },
+          sellerC.token
+        )
+      ).response.status,
+      201
+    );
+
+    const reevaluated = await requestJson(
+      "POST",
+      "/transactions/txn-v15-multihop-target/trust/evaluate",
+      { evaluatedBy: admin.user.id },
+      admin.token
+    );
+    assert.equal(reevaluated.response.status, 200);
+
+    const trust = reevaluated.payload.trustAssessment;
+    assert.ok(trust.fraudRingDisruption.ringMetrics.linkedTransactionCount >= 3);
+    assert.ok(trust.fraudRingDisruption.ringMetrics.hopDistribution.hop2 >= 1);
+    assert.ok(trust.fraudRingDisruption.ringMetrics.hopDistribution.hop3 >= 1);
+    assert.ok(
+      trust.fraudRingDisruption.recommendedActions.includes("ring_entity_quarantine")
+    );
+  });
+});
+
+test("trust operations v15 flags post-incident regression and can trigger rollback", async () => {
+  await withTestServer({}, async ({ requestJson, registerUser }) => {
+    const admin = await registerUser({
+      userId: "admin-trust-v14",
+      email: "admin-trust-v14@example.com",
+      password: "admin-password",
+      role: "admin"
+    });
+    const seller = await registerUser({
+      userId: "seller-trust-v14-regression",
+      email: "seller-trust-v14-regression@example.com",
+      password: "seller-password",
+      role: "seller"
+    });
+
+    const listing = await requestJson(
+      "POST",
+      "/listings",
+      {
+        listingId: "listing-trust-v14-regression",
+        title: "Tablet",
+        description: "seed listing",
+        priceCents: 55000,
+        localArea: "Metro-Regress"
+      },
+      seller.token
+    );
+    assert.equal(listing.response.status, 201);
+
+    for (let index = 1; index <= 8; index += 1) {
+      const seedBuyer = await registerUser({
+        userId: `buyer-trust-v14-regression-${index}`,
+        email: `buyer-trust-v14-regression-${index}@example.com`,
+        password: "buyer-password",
+        role: "buyer"
+      });
+
+      const seededTransaction = await requestJson(
+        "POST",
+        "/transactions",
+        {
+          transactionId: `txn-trust-v14-regression-seed-${index}`,
+          buyerId: seedBuyer.user.id,
+          amountCents: 72000,
+          deviceFingerprint: `device-v14-regression-${index}`,
+          paymentFingerprint: `payment-v14-regression-${index}`
+        },
+        seller.token
+      );
+      assert.equal(seededTransaction.response.status, 201);
+
+      const opened = await requestJson(
+        "POST",
+        `/transactions/txn-trust-v14-regression-seed-${index}/disputes`,
+        {},
+        seedBuyer.token
+      );
+      assert.equal(opened.response.status, 200);
+
+      const adjudicated = await requestJson(
+        "POST",
+        `/transactions/txn-trust-v14-regression-seed-${index}/disputes/adjudicate`,
+        { decision: "refund_to_buyer", notes: "regression-seed adverse outcome" },
+        admin.token
+      );
+      assert.equal(adjudicated.response.status, 200);
+    }
+
+    const targetBuyer = await registerUser({
+      userId: "buyer-trust-v14-regression-target",
+      email: "buyer-trust-v14-regression-target@example.com",
+      password: "buyer-password",
+      role: "buyer"
+    });
+
+    const target = await requestJson(
+      "POST",
+      "/transactions",
+      {
+        transactionId: "txn-trust-v14-regression-target",
+        buyerId: targetBuyer.user.id,
+        amountCents: 78000,
+        deviceFingerprint: "device-v14-regression-target",
+        paymentFingerprint: "payment-v14-regression-target"
+      },
+      seller.token
+    );
+    assert.equal(target.response.status, 201);
+
+    const trust = target.payload.trustAssessment;
+    assert.equal(trust.postIncidentVerification.regressionDetected, true);
+    assert.equal(trust.postIncidentVerification.controlStatus, "degraded");
+    assert.ok(
+      trust.postIncidentVerification.alerts.includes("policy_regression_detected")
+    );
+    assert.ok(
+      trust.reasonCodes.includes("post_incident_control_regression_detected")
+    );
+    assert.equal(trust.trustPolicyRollback.rollbackTriggered, true);
+    assert.ok(
+      trust.reasonCodes.includes("autonomous_trust_policy_rollback_triggered")
+    );
+    assert.ok(
+      trust.intervention.recommendedControls.includes("autonomous_policy_rollback")
+    );
+    assert.equal(trust.policyCanaryGovernance.rolloutDecision, "revert");
+    assert.equal(trust.policyCanaryGovernance.autoReverted, true);
+    assert.equal(trust.policyBlastRadiusSimulation.gateDecision, "block");
+    assert.ok(trust.reasonCodes.includes("policy_blast_radius_gate_blocked"));
+  });
+});

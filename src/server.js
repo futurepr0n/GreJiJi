@@ -481,9 +481,12 @@ export function createServer({
           sellerId: body.sellerId,
           amountCents: body.amountCents,
           acceptedAt: body.acceptedAt,
-          actorId: currentUser.id
+          actorId: currentUser.id,
+          deviceFingerprint: body.deviceFingerprint,
+          paymentFingerprint: body.paymentFingerprint
         });
-        sendJson(res, 201, { transaction });
+        const trustAssessment = store.getTrustAssessment({ transactionId: transaction.id });
+        sendJson(res, 201, { transaction, trustAssessment });
         return;
       }
 
@@ -514,6 +517,8 @@ export function createServer({
 
           const events = store.getTransactionEventHistory({ id: transactionId });
           const evidence = store.listDisputeEvidence({ transactionId });
+          const trustAssessment = store.getTrustAssessment({ transactionId });
+          const trustInterventions = store.listTrustInterventions({ transactionId, limit: 25 });
           const adjudicationActions = events.filter(
             (event) =>
               event.eventType === "dispute_resolved" ||
@@ -526,6 +531,8 @@ export function createServer({
               transaction,
               evidence,
               events,
+              trustAssessment,
+              trustInterventions,
               adjudicationActions
             }
           });
@@ -617,6 +624,29 @@ export function createServer({
           return;
         }
 
+        const trustParams = getPathParams(url.pathname, /^\/transactions\/([^/]+)\/trust$/);
+        if (trustParams) {
+          const currentUser = requireAuth(req, store);
+          const [transactionId] = trustParams;
+          const transaction = store.getTransactionById(transactionId);
+          if (!transaction) {
+            sendJson(res, 404, { error: "transaction not found" });
+            return;
+          }
+
+          if (!canReadTransaction(currentUser, transaction)) {
+            throw new StoreError(
+              "forbidden",
+              "only participants or admin can view trust assessments"
+            );
+          }
+
+          const trustAssessment = store.getTrustAssessment({ transactionId });
+          const trustInterventions = store.listTrustInterventions({ transactionId, limit: 50 });
+          sendJson(res, 200, { transactionId, trustAssessment, trustInterventions });
+          return;
+        }
+
         const params = getPathParams(url.pathname, /^\/transactions\/([^/]+)$/);
         if (params) {
           const currentUser = requireAuth(req, store);
@@ -631,7 +661,8 @@ export function createServer({
             throw new StoreError("forbidden", "only participants or admin can view this transaction");
           }
 
-          sendJson(res, 200, { transaction });
+          const trustAssessment = store.getTrustAssessment({ transactionId });
+          sendJson(res, 200, { transaction, trustAssessment });
           return;
         }
       }
@@ -717,7 +748,8 @@ export function createServer({
           const currentUser = requireAuth(req, store);
           const [transactionId] = confirmParams;
           const transaction = store.confirmDelivery({ id: transactionId, buyerId: currentUser.id });
-          sendJson(res, 200, { transaction });
+          const trustAssessment = store.getTrustAssessment({ transactionId });
+          sendJson(res, 200, { transaction, trustAssessment });
           return;
         }
 
@@ -726,7 +758,8 @@ export function createServer({
           const currentUser = requireAuth(req, store);
           const [transactionId] = disputeParams;
           const transaction = store.openDispute({ id: transactionId, actorId: currentUser.id });
-          sendJson(res, 200, { transaction });
+          const trustAssessment = store.getTrustAssessment({ transactionId });
+          sendJson(res, 200, { transaction, trustAssessment });
           return;
         }
 
@@ -739,7 +772,8 @@ export function createServer({
           requireRole(currentUser, "admin");
           const [transactionId] = resolveParams;
           const transaction = store.resolveDispute({ id: transactionId });
-          sendJson(res, 200, { transaction });
+          const trustAssessment = store.getTrustAssessment({ transactionId });
+          sendJson(res, 200, { transaction, trustAssessment });
           return;
         }
 
@@ -758,7 +792,27 @@ export function createServer({
             decidedBy: body.decidedBy ?? currentUser.id,
             notes: body.notes
           });
-          sendJson(res, 200, { transaction });
+          const trustAssessment = store.getTrustAssessment({ transactionId });
+          sendJson(res, 200, { transaction, trustAssessment });
+          return;
+        }
+
+        const evaluateTrustParams = getPathParams(
+          url.pathname,
+          /^\/transactions\/([^/]+)\/trust\/evaluate$/
+        );
+        if (evaluateTrustParams) {
+          const currentUser = requireAuth(req, store);
+          requireRole(currentUser, "admin");
+          const [transactionId] = evaluateTrustParams;
+          const body = await readRequestBody(req);
+          const trustAssessment = store.evaluateTrustAssessment({
+            transactionId,
+            evaluatedBy: body.evaluatedBy ?? currentUser.id,
+            evaluatedAt: body.evaluatedAt
+          });
+          const trustInterventions = store.listTrustInterventions({ transactionId, limit: 10 });
+          sendJson(res, 200, { transactionId, trustAssessment, trustInterventions });
           return;
         }
 

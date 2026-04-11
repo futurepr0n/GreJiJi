@@ -25,6 +25,7 @@ Default local URLs:
 - Repo API reference: `docs/api-reference.md`
 - Repo operations guide: `docs/operations.md`
 - Live browsable docs: `GET /docs`
+- Trust assessment APIs: `GET /transactions/:transactionId/trust` and `POST /transactions/:transactionId/trust/evaluate`
 
 ## Configuration
 
@@ -58,6 +59,7 @@ Default local URLs:
 - atomic notification outbox writes for downstream processing
 - notification dispatch job with retry/backoff metadata
 - user inbox APIs for listing and acknowledging delivered notifications
+- trust operations v16 with explainability, adaptive identity-friction traces, post-incident verification, fraud-ring disruption, account-takeover containment, settlement-risk stress controls, and autonomous policy canary governance
 
 ## Test suite
 
@@ -66,6 +68,13 @@ npm test
 ```
 
 Frontend smoke checks (served shell/assets) are included in `npm test` under `test/smoke.test.js`.
+
+Trust coverage in the same suite verifies:
+
+- persisted `trust-ops-v16` assessment payloads on transaction creation
+- `GET /transactions/:transactionId/trust` history reads for participants and admins
+- canary promote/hold/revert decisions and rollback propagation into intervention history
+- linked device/payment containment signals and settlement stress scenario outputs
 
 ## Frontend workflow
 
@@ -128,4 +137,5 @@ Useful local DB checks:
 sqlite3 ./data/grejiji.sqlite "SELECT id, transaction_id, topic, status, attempt_count, last_attempt_at, next_retry_at, sent_at, failed_at FROM notification_outbox ORDER BY id;"
 sqlite3 ./data/grejiji.sqlite "SELECT id, recipient_user_id, transaction_id, topic, status, created_at, read_at, acknowledged_at FROM user_notifications ORDER BY id;"
 sqlite3 ./data/grejiji.sqlite "SELECT id, transaction_id, uploader_user_id, mime_type, size_bytes, checksum_sha256, storage_key, created_at FROM dispute_evidence ORDER BY created_at, id;"
+sqlite3 ./data/grejiji.sqlite "SELECT transaction_id, orchestration_version, risk_band, json_extract(account_takeover_containment_json, '$.containmentBand'), json_extract(settlement_risk_stress_controls_json, '$.maxScenarioSeverity'), json_extract(policy_canary_governance_json, '$.rolloutDecision') FROM trust_assessments ORDER BY updated_at DESC;"
 ```

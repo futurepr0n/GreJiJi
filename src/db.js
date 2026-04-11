@@ -1,7 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 
 import Database from "better-sqlite3";
+import { evaluateTrustOperationsV17 } from "./trust.js";
 
 const VALID_STATUSES = new Set(["accepted", "disputed", "completed"]);
 const VALID_ROLES = new Set(["buyer", "seller", "admin"]);
@@ -84,6 +86,30 @@ function normalizeCurrencyCode(currency) {
     throw new StoreError("validation", "settlement currency must be a 3-letter ISO code");
   }
   return normalized;
+}
+
+function stableSerialize(value) {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableSerialize(item)).join(",")}]`;
+  }
+  const keys = Object.keys(value).sort();
+  const body = keys.map((key) => `${JSON.stringify(key)}:${stableSerialize(value[key])}`).join(",");
+  return `{${body}}`;
+}
+
+function hashSha256Hex(value) {
+  return crypto.createHash("sha256").update(String(value)).digest("hex");
+}
+
+function normalizeEntityKey(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
 }
 
 export class StoreError extends Error {
@@ -185,6 +211,18 @@ function parseJsonOrEmpty(value) {
   }
 }
 
+function parseJsonOrArray(value) {
+  if (!value) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 function mapTransactionEvent(row) {
   if (!row) {
     return null;
@@ -274,6 +312,76 @@ function mapDisputeEvidence(row) {
     sizeBytes: row.size_bytes,
     checksumSha256: row.checksum_sha256,
     storageKey: row.storage_key,
+    createdAt: row.created_at
+  };
+}
+
+function mapTrustAssessment(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    transactionId: row.transaction_id,
+    riskScore: row.risk_score,
+    riskBand: row.risk_band,
+    confidenceBand: row.confidence_band,
+    criticality: row.criticality,
+    geospatialSignals: parseJsonOrEmpty(row.geospatial_signals_json),
+    graphSignals: parseJsonOrEmpty(row.graph_signals_json),
+    escrowStress: parseJsonOrEmpty(row.escrow_stress_json),
+    explainability: parseJsonOrEmpty(row.explainability_json),
+    identityFriction: parseJsonOrEmpty(row.identity_friction_json),
+    postIncidentVerification: parseJsonOrEmpty(row.post_incident_verification_json),
+    fraudRingDisruption: parseJsonOrEmpty(row.fraud_ring_disruption_json),
+    escrowAdversarialSimulation: parseJsonOrEmpty(row.escrow_adversarial_simulation_json),
+    trustPolicyRollback: parseJsonOrEmpty(row.trust_policy_rollback_json),
+    accountTakeoverContainment: parseJsonOrEmpty(row.account_takeover_containment_json),
+    settlementRiskStressControls: parseJsonOrEmpty(row.settlement_risk_stress_controls_json),
+    crossMarketCollusionInterdiction: parseJsonOrEmpty(row.cross_market_collusion_interdiction_json),
+    escrowIntegrityAttestations: parseJsonOrEmpty(row.escrow_integrity_attestations_json),
+    policyBlastRadiusSimulation: parseJsonOrEmpty(row.policy_blast_radius_simulation_json),
+    policyCanaryGovernance: parseJsonOrEmpty(row.policy_canary_governance_json),
+    intervention: parseJsonOrEmpty(row.intervention_json),
+    reasonCodes: parseJsonOrArray(row.reason_codes_json),
+    evidenceSummary: parseJsonOrEmpty(row.evidence_summary_json),
+    evidenceProvenance: parseJsonOrEmpty(row.evidence_provenance_json),
+    outcomeFeedback: parseJsonOrEmpty(row.outcome_feedback_json),
+    orchestrationVersion: row.orchestration_version,
+    lastEvaluatedBy: row.last_evaluated_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapTrustIntervention(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    transactionId: row.transaction_id,
+    riskScore: row.risk_score,
+    riskBand: row.risk_band,
+    recommendedControls: parseJsonOrArray(row.recommended_controls_json),
+    decision: parseJsonOrEmpty(row.decision_json),
+    identityFriction: parseJsonOrEmpty(row.identity_friction_json),
+    postIncidentVerification: parseJsonOrEmpty(row.post_incident_verification_json),
+    fraudRingDisruption: parseJsonOrEmpty(row.fraud_ring_disruption_json),
+    escrowAdversarialSimulation: parseJsonOrEmpty(row.escrow_adversarial_simulation_json),
+    trustPolicyRollback: parseJsonOrEmpty(row.trust_policy_rollback_json),
+    accountTakeoverContainment: parseJsonOrEmpty(row.account_takeover_containment_json),
+    settlementRiskStressControls: parseJsonOrEmpty(row.settlement_risk_stress_controls_json),
+    crossMarketCollusionInterdiction: parseJsonOrEmpty(row.cross_market_collusion_interdiction_json),
+    escrowIntegrityAttestations: parseJsonOrEmpty(row.escrow_integrity_attestations_json),
+    policyBlastRadiusSimulation: parseJsonOrEmpty(row.policy_blast_radius_simulation_json),
+    policyCanaryGovernance: parseJsonOrEmpty(row.policy_canary_governance_json),
+    reasonCodes: parseJsonOrArray(row.reason_codes_json),
+    evidenceSummary: parseJsonOrEmpty(row.evidence_summary_json),
+    provenanceRef: row.provenance_ref ?? null,
+    outcomeFeedback: parseJsonOrEmpty(row.outcome_feedback_json),
+    evaluatedBy: row.evaluated_by,
     createdAt: row.created_at
   };
 }
@@ -445,6 +553,361 @@ export function createTransactionStore({
     ) ev ON ev.transaction_id = t.id
     WHERE t.dispute_opened_at IS NOT NULL
     ORDER BY t.updated_at DESC, t.id DESC
+  `);
+  const getTrustAssessmentByTransactionId = db.prepare(`
+    SELECT *
+    FROM trust_assessments
+    WHERE transaction_id = ?
+  `);
+  const upsertTrustAssessment = db.prepare(`
+    INSERT INTO trust_assessments (
+      transaction_id,
+      risk_score,
+      risk_band,
+      confidence_band,
+      criticality,
+      geospatial_signals_json,
+      graph_signals_json,
+      escrow_stress_json,
+      explainability_json,
+      identity_friction_json,
+      post_incident_verification_json,
+      fraud_ring_disruption_json,
+      escrow_adversarial_simulation_json,
+      trust_policy_rollback_json,
+      account_takeover_containment_json,
+      settlement_risk_stress_controls_json,
+      cross_market_collusion_interdiction_json,
+      escrow_integrity_attestations_json,
+      policy_blast_radius_simulation_json,
+      policy_canary_governance_json,
+      intervention_json,
+      reason_codes_json,
+      evidence_summary_json,
+      evidence_provenance_json,
+      outcome_feedback_json,
+      orchestration_version,
+      last_evaluated_by,
+      created_at,
+      updated_at
+    ) VALUES (
+      @transaction_id,
+      @risk_score,
+      @risk_band,
+      @confidence_band,
+      @criticality,
+      @geospatial_signals_json,
+      @graph_signals_json,
+      @escrow_stress_json,
+      @explainability_json,
+      @identity_friction_json,
+      @post_incident_verification_json,
+      @fraud_ring_disruption_json,
+      @escrow_adversarial_simulation_json,
+      @trust_policy_rollback_json,
+      @account_takeover_containment_json,
+      @settlement_risk_stress_controls_json,
+      @cross_market_collusion_interdiction_json,
+      @escrow_integrity_attestations_json,
+      @policy_blast_radius_simulation_json,
+      @policy_canary_governance_json,
+      @intervention_json,
+      @reason_codes_json,
+      @evidence_summary_json,
+      @evidence_provenance_json,
+      @outcome_feedback_json,
+      @orchestration_version,
+      @last_evaluated_by,
+      @created_at,
+      @updated_at
+    )
+    ON CONFLICT(transaction_id) DO UPDATE SET
+      risk_score = excluded.risk_score,
+      risk_band = excluded.risk_band,
+      confidence_band = excluded.confidence_band,
+      criticality = excluded.criticality,
+      geospatial_signals_json = excluded.geospatial_signals_json,
+      graph_signals_json = excluded.graph_signals_json,
+      escrow_stress_json = excluded.escrow_stress_json,
+      explainability_json = excluded.explainability_json,
+      identity_friction_json = excluded.identity_friction_json,
+      post_incident_verification_json = excluded.post_incident_verification_json,
+      fraud_ring_disruption_json = excluded.fraud_ring_disruption_json,
+      escrow_adversarial_simulation_json = excluded.escrow_adversarial_simulation_json,
+      trust_policy_rollback_json = excluded.trust_policy_rollback_json,
+      account_takeover_containment_json = excluded.account_takeover_containment_json,
+      settlement_risk_stress_controls_json = excluded.settlement_risk_stress_controls_json,
+      cross_market_collusion_interdiction_json = excluded.cross_market_collusion_interdiction_json,
+      escrow_integrity_attestations_json = excluded.escrow_integrity_attestations_json,
+      policy_blast_radius_simulation_json = excluded.policy_blast_radius_simulation_json,
+      policy_canary_governance_json = excluded.policy_canary_governance_json,
+      intervention_json = excluded.intervention_json,
+      reason_codes_json = excluded.reason_codes_json,
+      evidence_summary_json = excluded.evidence_summary_json,
+      evidence_provenance_json = excluded.evidence_provenance_json,
+      outcome_feedback_json = excluded.outcome_feedback_json,
+      orchestration_version = excluded.orchestration_version,
+      last_evaluated_by = excluded.last_evaluated_by,
+      updated_at = excluded.updated_at
+  `);
+  const insertTrustIntervention = db.prepare(`
+    INSERT INTO trust_interventions (
+      transaction_id,
+      risk_score,
+      risk_band,
+      recommended_controls_json,
+      decision_json,
+      identity_friction_json,
+      post_incident_verification_json,
+      fraud_ring_disruption_json,
+      escrow_adversarial_simulation_json,
+      trust_policy_rollback_json,
+      account_takeover_containment_json,
+      settlement_risk_stress_controls_json,
+      cross_market_collusion_interdiction_json,
+      escrow_integrity_attestations_json,
+      policy_blast_radius_simulation_json,
+      policy_canary_governance_json,
+      reason_codes_json,
+      evidence_summary_json,
+      provenance_ref,
+      outcome_feedback_json,
+      evaluated_by,
+      created_at
+    ) VALUES (
+      @transaction_id,
+      @risk_score,
+      @risk_band,
+      @recommended_controls_json,
+      @decision_json,
+      @identity_friction_json,
+      @post_incident_verification_json,
+      @fraud_ring_disruption_json,
+      @escrow_adversarial_simulation_json,
+      @trust_policy_rollback_json,
+      @account_takeover_containment_json,
+      @settlement_risk_stress_controls_json,
+      @cross_market_collusion_interdiction_json,
+      @escrow_integrity_attestations_json,
+      @policy_blast_radius_simulation_json,
+      @policy_canary_governance_json,
+      @reason_codes_json,
+      @evidence_summary_json,
+      @provenance_ref,
+      @outcome_feedback_json,
+      @evaluated_by,
+      @created_at
+    )
+  `);
+  const insertTrustSignalSnapshot = db.prepare(`
+    INSERT INTO trust_signal_snapshots (
+      id,
+      transaction_id,
+      snapshot_hash,
+      signals_json,
+      lineage_json,
+      created_at
+    ) VALUES (
+      @id,
+      @transaction_id,
+      @snapshot_hash,
+      @signals_json,
+      @lineage_json,
+      @created_at
+    )
+    ON CONFLICT(transaction_id, snapshot_hash) DO NOTHING
+  `);
+  const insertTransactionRiskEntity = db.prepare(`
+    INSERT INTO transaction_risk_entities (
+      transaction_id,
+      entity_type,
+      entity_key,
+      source,
+      confidence,
+      created_at
+    ) VALUES (
+      @transaction_id,
+      @entity_type,
+      @entity_key,
+      @source,
+      @confidence,
+      @created_at
+    )
+    ON CONFLICT(transaction_id, entity_type, entity_key) DO NOTHING
+  `);
+  const getRiskGraphSummary = db.prepare(`
+    SELECT
+      COUNT(DISTINCT linked.transaction_id) AS linked_transaction_count,
+      COUNT(DISTINCT linked.entity_type || ':' || linked.entity_key) AS shared_entity_count,
+      SUM(
+        CASE
+          WHEN tx.dispute_opened_at IS NOT NULL OR tx.settlement_outcome IN ('refunded', 'cancelled') THEN 1
+          ELSE 0
+        END
+      ) AS linked_disputed_count
+    FROM (
+      SELECT DISTINCT e2.transaction_id, e2.entity_type, e2.entity_key
+      FROM transaction_risk_entities e1
+      JOIN transaction_risk_entities e2
+        ON e1.entity_type = e2.entity_type
+        AND e1.entity_key = e2.entity_key
+      WHERE e1.transaction_id = @transaction_id
+        AND e2.transaction_id <> @transaction_id
+    ) linked
+    JOIN transactions tx ON tx.id = linked.transaction_id
+  `);
+  const getRiskGraphEntityTypeCounts = db.prepare(`
+    SELECT
+      linked.entity_type,
+      COUNT(DISTINCT linked.entity_key) AS shared_count
+    FROM (
+      SELECT DISTINCT e2.transaction_id, e2.entity_type, e2.entity_key
+      FROM transaction_risk_entities e1
+      JOIN transaction_risk_entities e2
+        ON e1.entity_type = e2.entity_type
+        AND e1.entity_key = e2.entity_key
+      WHERE e1.transaction_id = @transaction_id
+        AND e2.transaction_id <> @transaction_id
+    ) linked
+    GROUP BY linked.entity_type
+  `);
+  const listMultiHopLinkedTransactions = db.prepare(`
+    WITH RECURSIVE ring(tx_id, hop) AS (
+      SELECT @transaction_id AS tx_id, 0 AS hop
+      UNION
+      SELECT DISTINCT e2.transaction_id AS tx_id, ring.hop + 1 AS hop
+      FROM ring
+      JOIN transaction_risk_entities e1
+        ON e1.transaction_id = ring.tx_id
+      JOIN transaction_risk_entities e2
+        ON e2.entity_type = e1.entity_type
+        AND e2.entity_key = e1.entity_key
+      WHERE ring.hop < @max_hops
+        AND e1.entity_type IN ('user', 'device', 'payment_fingerprint')
+        AND e2.transaction_id <> ring.tx_id
+    )
+    SELECT
+      ring.tx_id AS transaction_id,
+      MIN(ring.hop) AS hop,
+      MAX(
+        CASE
+          WHEN t.dispute_opened_at IS NOT NULL OR t.settlement_outcome IN ('refunded', 'cancelled') THEN 1
+          ELSE 0
+        END
+      ) AS is_disputed
+    FROM ring
+    JOIN transactions t ON t.id = ring.tx_id
+    WHERE ring.tx_id <> @transaction_id
+    GROUP BY ring.tx_id
+  `);
+  const getFeedbackCalibrationSummary = db.prepare(`
+    SELECT
+      COUNT(1) AS sample_size,
+      SUM(
+        CASE
+          WHEN t.settlement_outcome IN ('refunded', 'cancelled') OR t.dispute_opened_at IS NOT NULL THEN 1
+          ELSE 0
+        END
+      ) AS adverse_count
+    FROM trust_assessments ta
+    JOIN transactions t ON t.id = ta.transaction_id
+    WHERE ta.transaction_id <> @transaction_id
+      AND t.settlement_outcome IS NOT NULL
+  `);
+  const listTrustInterventionsByTransactionId = db.prepare(`
+    SELECT *
+    FROM trust_interventions
+    WHERE transaction_id = @transaction_id
+    ORDER BY created_at DESC, id DESC
+    LIMIT @limit
+  `);
+  const getSellerPrimaryLocalArea = db.prepare(`
+    SELECT local_area
+    FROM listings
+    WHERE seller_id = @seller_id
+    ORDER BY updated_at DESC, created_at DESC, id DESC
+    LIMIT 1
+  `);
+  const getAreaRiskStats = db.prepare(`
+    SELECT
+      COUNT(1) AS transaction_count,
+      SUM(
+        CASE
+          WHEN t.status = 'disputed' OR t.dispute_opened_at IS NOT NULL THEN 1
+          ELSE 0
+        END
+      ) AS disputed_count
+    FROM transactions t
+    WHERE t.id <> @transaction_id
+      AND EXISTS (
+        SELECT 1
+        FROM listings l
+        WHERE l.seller_id = t.seller_id
+          AND l.local_area = @local_area
+      )
+  `);
+  const getParticipantRiskStats = db.prepare(`
+    SELECT
+      COUNT(1) AS transaction_count,
+      SUM(
+        CASE
+          WHEN t.dispute_opened_at IS NOT NULL THEN 1
+          ELSE 0
+        END
+      ) AS disputed_count
+    FROM transactions t
+    WHERE t.id <> @transaction_id
+      AND (
+        t.buyer_id = @buyer_id
+        OR t.seller_id = @buyer_id
+        OR t.buyer_id = @seller_id
+        OR t.seller_id = @seller_id
+      )
+  `);
+  const getSellerIncidentOutcomeStats = db.prepare(`
+    SELECT
+      COUNT(1) AS settled_count,
+      SUM(
+        CASE
+          WHEN t.settlement_outcome IN ('refunded', 'cancelled') THEN 1
+          ELSE 0
+        END
+      ) AS adverse_count,
+      SUM(
+        CASE
+          WHEN t.dispute_opened_at IS NOT NULL THEN 1
+          ELSE 0
+        END
+      ) AS disputed_count
+    FROM transactions t
+    WHERE t.id <> @transaction_id
+      AND t.seller_id = @seller_id
+      AND t.settlement_outcome IS NOT NULL
+  `);
+  const getAreaIncidentOutcomeStats = db.prepare(`
+    SELECT
+      COUNT(1) AS settled_count,
+      SUM(
+        CASE
+          WHEN t.settlement_outcome IN ('refunded', 'cancelled') THEN 1
+          ELSE 0
+        END
+      ) AS adverse_count,
+      SUM(
+        CASE
+          WHEN t.dispute_opened_at IS NOT NULL THEN 1
+          ELSE 0
+        END
+      ) AS disputed_count
+    FROM transactions t
+    WHERE t.id <> @transaction_id
+      AND t.settlement_outcome IS NOT NULL
+      AND EXISTS (
+        SELECT 1
+        FROM listings l
+        WHERE l.seller_id = t.seller_id
+          AND l.local_area = @local_area
+      )
   `);
 
   const insertOutboxRecord = db.prepare(`
@@ -841,6 +1304,389 @@ export function createTransactionStore({
     }
   }
 
+  function linkTransactionRiskEntity({
+    transactionId,
+    entityType,
+    entityKey,
+    source,
+    confidence = 1,
+    createdAt
+  }) {
+    const normalizedEntityKey = normalizeEntityKey(entityKey);
+    if (!normalizedEntityKey) {
+      return;
+    }
+
+    insertTransactionRiskEntity.run({
+      transaction_id: transactionId,
+      entity_type: entityType,
+      entity_key: normalizedEntityKey,
+      source,
+      confidence: clamp(Number(confidence), 0, 1),
+      created_at: createdAt ?? now().toISOString()
+    });
+  }
+
+  function buildRiskGraphStats({ transactionId }) {
+    const summaryRow = getRiskGraphSummary.get({ transaction_id: transactionId });
+    const entityRows = getRiskGraphEntityTypeCounts.all({ transaction_id: transactionId });
+    const entityTypeCounts = {};
+    for (const row of entityRows) {
+      entityTypeCounts[row.entity_type] = Number(row.shared_count ?? 0);
+    }
+    return {
+      linkedTransactionCount: Number(summaryRow?.linked_transaction_count ?? 0),
+      sharedEntityCount: Number(summaryRow?.shared_entity_count ?? 0),
+      linkedDisputedCount: Number(summaryRow?.linked_disputed_count ?? 0),
+      entityTypeCounts
+    };
+  }
+
+  function buildMultiHopRingStats({ transactionId, maxHops = 3 }) {
+    const linkedRows = listMultiHopLinkedTransactions.all({
+      transaction_id: transactionId,
+      max_hops: Number(maxHops)
+    });
+
+    if (linkedRows.length === 0) {
+      return {
+        linkedTransactionCount: 0,
+        linkedDisputedCount: 0,
+        hopDistribution: {
+          hop1: 0,
+          hop2: 0,
+          hop3: 0
+        },
+        uniqueBuyers: 0,
+        uniqueSellers: 0,
+        sharedDevices: 0,
+        sharedPaymentFingerprints: 0,
+        graphSnapshotRef: null
+      };
+    }
+
+    const hopDistribution = { hop1: 0, hop2: 0, hop3: 0 };
+    for (const row of linkedRows) {
+      const hop = Number(row.hop ?? 0);
+      if (hop === 1) {
+        hopDistribution.hop1 += 1;
+      } else if (hop === 2) {
+        hopDistribution.hop2 += 1;
+      } else if (hop >= 3) {
+        hopDistribution.hop3 += 1;
+      }
+    }
+
+    const linkedTransactionCount = linkedRows.length;
+    const linkedDisputedCount = linkedRows.reduce(
+      (sum, row) => sum + Number(row.is_disputed ?? 0),
+      0
+    );
+
+    const transactionIds = linkedRows.map((row) => row.transaction_id);
+    const placeholders = transactionIds.map(() => "?").join(", ");
+    const entityRows = db
+      .prepare(
+        `SELECT entity_type, entity_key
+         FROM transaction_risk_entities
+         WHERE transaction_id IN (${placeholders})
+           AND entity_type IN ('user', 'device', 'payment_fingerprint')`
+      )
+      .all(...transactionIds);
+
+    const buyerKeys = new Set();
+    const sellerKeys = new Set();
+    const deviceKeys = new Set();
+    const paymentKeys = new Set();
+    for (const entity of entityRows) {
+      const entityType = String(entity.entity_type ?? "");
+      const entityKey = String(entity.entity_key ?? "");
+      if (!entityKey) {
+        continue;
+      }
+
+      if (entityType === "user") {
+        if (entityKey.startsWith("buyer:")) {
+          buyerKeys.add(entityKey);
+        } else if (entityKey.startsWith("seller:")) {
+          sellerKeys.add(entityKey);
+        }
+      } else if (entityType === "device") {
+        deviceKeys.add(entityKey);
+      } else if (entityType === "payment_fingerprint") {
+        paymentKeys.add(entityKey);
+      }
+    }
+
+    return {
+      linkedTransactionCount,
+      linkedDisputedCount,
+      hopDistribution,
+      uniqueBuyers: buyerKeys.size,
+      uniqueSellers: sellerKeys.size,
+      sharedDevices: deviceKeys.size,
+      sharedPaymentFingerprints: paymentKeys.size,
+      graphSnapshotRef: `ring-${transactionId}-${linkedTransactionCount}-${linkedDisputedCount}`
+    };
+  }
+
+  function buildFeedbackCalibration({ transactionId }) {
+    const summaryRow = getFeedbackCalibrationSummary.get({ transaction_id: transactionId });
+    const sampleSize = Number(summaryRow?.sample_size ?? 0);
+    const adverseCount = Number(summaryRow?.adverse_count ?? 0);
+    const adverseRate = sampleSize > 0 ? adverseCount / sampleSize : 0;
+
+    if (sampleSize < 5) {
+      return {
+        mediumThreshold: 35,
+        highThreshold: 70,
+        adjustment: 0,
+        sampleSize,
+        safeguard: "minimum_sample_not_met",
+        observedAdverseRate: Number((adverseRate * 100).toFixed(2))
+      };
+    }
+
+    const targetAdverseRate = 0.22;
+    const adjustment = clamp(Math.round((adverseRate - targetAdverseRate) * 20), -8, 8);
+    const mediumThreshold = clamp(35 - adjustment, 20, 55);
+    const highThreshold = clamp(70 - adjustment, 55, 85);
+
+    return {
+      mediumThreshold,
+      highThreshold: Math.max(highThreshold, mediumThreshold + 15),
+      adjustment,
+      sampleSize,
+      safeguard: "bounded_adjustment",
+      observedAdverseRate: Number((adverseRate * 100).toFixed(2)),
+      targetAdverseRate: Number((targetAdverseRate * 100).toFixed(2))
+    };
+  }
+
+  function buildEvidenceProvenance({
+    transactionId,
+    timestamp,
+    sellerArea,
+    areaStats,
+    participantStats,
+    graphStats,
+    ringStats,
+    feedbackCalibration,
+    incidentStats
+  }) {
+    const snapshotSignals = {
+      transactionId,
+      sellerArea,
+      areaStats,
+      participantStats,
+      graphStats,
+      ringStats,
+      feedbackCalibration,
+      incidentStats,
+      capturedAt: timestamp
+    };
+    const snapshotHash = hashSha256Hex(stableSerialize(snapshotSignals));
+    const snapshotId = `trust-signal-${transactionId}-${snapshotHash.slice(0, 12)}`;
+    const lineage = [
+      { source: "transactions", field: "buyer_id,seller_id,amount_cents,status,settlement_outcome" },
+      { source: "listings", field: "local_area" },
+      { source: "transaction_risk_entities", field: "entity_type,entity_key,confidence" },
+      { source: "transaction_risk_entities", field: "recursive_multi_hop_ring_neighbors" },
+      { source: "trust_assessments", field: "risk_band,outcome_feedback_json" }
+    ];
+
+    insertTrustSignalSnapshot.run({
+      id: snapshotId,
+      transaction_id: transactionId,
+      snapshot_hash: snapshotHash,
+      signals_json: stableSerialize(snapshotSignals),
+      lineage_json: JSON.stringify(lineage),
+      created_at: timestamp
+    });
+
+    return {
+      snapshotId,
+      snapshotHash,
+      algorithm: "sha256(stable-json)",
+      lineage,
+      generatedAt: timestamp
+    };
+  }
+
+  function evaluateTrustForExistingTransaction({
+    transactionId,
+    evaluatedBy = "system:trust_orchestrator",
+    evaluatedAt
+  }) {
+    const transaction = mapTransaction(getTransactionByIdQuery.get(transactionId));
+    if (!transaction) {
+      throw new StoreError("not_found", "transaction not found");
+    }
+
+    const timestamp = evaluatedAt ? toIsoString(evaluatedAt) : now().toISOString();
+    const sellerAreaRow = getSellerPrimaryLocalArea.get({ seller_id: transaction.sellerId });
+    const sellerArea = sellerAreaRow?.local_area ?? null;
+    const areaStatsRow = sellerArea
+      ? getAreaRiskStats.get({ transaction_id: transactionId, local_area: sellerArea })
+      : { transaction_count: 0, disputed_count: 0 };
+    const participantStatsRow = getParticipantRiskStats.get({
+      transaction_id: transactionId,
+      buyer_id: transaction.buyerId,
+      seller_id: transaction.sellerId
+    });
+    const sellerIncidentStatsRow = getSellerIncidentOutcomeStats.get({
+      transaction_id: transactionId,
+      seller_id: transaction.sellerId
+    });
+    const areaIncidentStatsRow = sellerArea
+      ? getAreaIncidentOutcomeStats.get({ transaction_id: transactionId, local_area: sellerArea })
+      : { settled_count: 0, adverse_count: 0, disputed_count: 0 };
+    const incidentStats = {
+      sellerSettledCount: Number(sellerIncidentStatsRow?.settled_count ?? 0),
+      sellerAdverseCount: Number(sellerIncidentStatsRow?.adverse_count ?? 0),
+      sellerDisputedCount: Number(sellerIncidentStatsRow?.disputed_count ?? 0),
+      areaSettledCount: Number(areaIncidentStatsRow?.settled_count ?? 0),
+      areaAdverseCount: Number(areaIncidentStatsRow?.adverse_count ?? 0),
+      areaDisputedCount: Number(areaIncidentStatsRow?.disputed_count ?? 0)
+    };
+    const graphStats = buildRiskGraphStats({ transactionId });
+    const ringStats = buildMultiHopRingStats({ transactionId, maxHops: 3 });
+    const feedbackCalibration = buildFeedbackCalibration({ transactionId });
+    const evidenceProvenance = buildEvidenceProvenance({
+      transactionId,
+      timestamp,
+      sellerArea,
+      areaStats: {
+        transactionCount: Number(areaStatsRow?.transaction_count ?? 0),
+        disputedCount: Number(areaStatsRow?.disputed_count ?? 0)
+      },
+      participantStats: {
+        transactionCount: Number(participantStatsRow?.transaction_count ?? 0),
+        disputedCount: Number(participantStatsRow?.disputed_count ?? 0)
+      },
+      graphStats,
+      ringStats,
+      feedbackCalibration,
+      incidentStats
+    });
+
+    const assessmentPayload = evaluateTrustOperationsV17({
+      transaction,
+      sellerArea,
+      areaStats: {
+        transactionCount: Number(areaStatsRow?.transaction_count ?? 0),
+        disputedCount: Number(areaStatsRow?.disputed_count ?? 0)
+      },
+      participantStats: {
+        transactionCount: Number(participantStatsRow?.transaction_count ?? 0),
+        disputedCount: Number(participantStatsRow?.disputed_count ?? 0)
+      },
+      graphStats,
+      ringStats,
+      feedbackCalibration,
+      evidenceProvenance,
+      incidentStats,
+      evaluatedAt: timestamp
+    });
+
+    const runPersist = db.transaction(() => {
+      const previous = getTrustAssessmentByTransactionId.get(transactionId);
+      upsertTrustAssessment.run({
+        transaction_id: transactionId,
+        risk_score: assessmentPayload.riskScore,
+        risk_band: assessmentPayload.riskBand,
+        confidence_band: assessmentPayload.confidenceBand,
+        criticality: assessmentPayload.criticality,
+        geospatial_signals_json: JSON.stringify(assessmentPayload.geospatialSignals),
+        graph_signals_json: JSON.stringify(assessmentPayload.graphSignals),
+        escrow_stress_json: JSON.stringify(assessmentPayload.escrowStress),
+        explainability_json: JSON.stringify(assessmentPayload.explainability),
+        identity_friction_json: JSON.stringify(assessmentPayload.identityFriction),
+        post_incident_verification_json: JSON.stringify(
+          assessmentPayload.postIncidentVerification
+        ),
+        fraud_ring_disruption_json: JSON.stringify(assessmentPayload.fraudRingDisruption),
+        escrow_adversarial_simulation_json: JSON.stringify(
+          assessmentPayload.escrowAdversarialSimulation
+        ),
+        trust_policy_rollback_json: JSON.stringify(assessmentPayload.trustPolicyRollback),
+        account_takeover_containment_json: JSON.stringify(
+          assessmentPayload.accountTakeoverContainment
+        ),
+        settlement_risk_stress_controls_json: JSON.stringify(
+          assessmentPayload.settlementRiskStressControls
+        ),
+        cross_market_collusion_interdiction_json: JSON.stringify(
+          assessmentPayload.crossMarketCollusionInterdiction
+        ),
+        escrow_integrity_attestations_json: JSON.stringify(
+          assessmentPayload.escrowIntegrityAttestations
+        ),
+        policy_blast_radius_simulation_json: JSON.stringify(
+          assessmentPayload.policyBlastRadiusSimulation
+        ),
+        policy_canary_governance_json: JSON.stringify(
+          assessmentPayload.policyCanaryGovernance
+        ),
+        intervention_json: JSON.stringify(assessmentPayload.intervention),
+        reason_codes_json: JSON.stringify(assessmentPayload.reasonCodes),
+        evidence_summary_json: JSON.stringify(assessmentPayload.evidenceSummary),
+        evidence_provenance_json: JSON.stringify(assessmentPayload.evidenceProvenance),
+        outcome_feedback_json: JSON.stringify(assessmentPayload.outcomeFeedback),
+        orchestration_version: "trust-ops-v17",
+        last_evaluated_by: evaluatedBy,
+        created_at: previous?.created_at ?? timestamp,
+        updated_at: timestamp
+      });
+
+      insertTrustIntervention.run({
+        transaction_id: transactionId,
+        risk_score: assessmentPayload.riskScore,
+        risk_band: assessmentPayload.riskBand,
+        recommended_controls_json: JSON.stringify(
+          assessmentPayload.intervention.recommendedControls ?? []
+        ),
+        decision_json: JSON.stringify(assessmentPayload.intervention),
+        identity_friction_json: JSON.stringify(assessmentPayload.identityFriction),
+        post_incident_verification_json: JSON.stringify(
+          assessmentPayload.postIncidentVerification
+        ),
+        fraud_ring_disruption_json: JSON.stringify(assessmentPayload.fraudRingDisruption),
+        escrow_adversarial_simulation_json: JSON.stringify(
+          assessmentPayload.escrowAdversarialSimulation
+        ),
+        trust_policy_rollback_json: JSON.stringify(assessmentPayload.trustPolicyRollback),
+        account_takeover_containment_json: JSON.stringify(
+          assessmentPayload.accountTakeoverContainment
+        ),
+        settlement_risk_stress_controls_json: JSON.stringify(
+          assessmentPayload.settlementRiskStressControls
+        ),
+        cross_market_collusion_interdiction_json: JSON.stringify(
+          assessmentPayload.crossMarketCollusionInterdiction
+        ),
+        escrow_integrity_attestations_json: JSON.stringify(
+          assessmentPayload.escrowIntegrityAttestations
+        ),
+        policy_blast_radius_simulation_json: JSON.stringify(
+          assessmentPayload.policyBlastRadiusSimulation
+        ),
+        policy_canary_governance_json: JSON.stringify(
+          assessmentPayload.policyCanaryGovernance
+        ),
+        reason_codes_json: JSON.stringify(assessmentPayload.reasonCodes),
+        evidence_summary_json: JSON.stringify(assessmentPayload.evidenceSummary),
+        provenance_ref: assessmentPayload.evidenceProvenance?.snapshotId ?? null,
+        outcome_feedback_json: JSON.stringify(assessmentPayload.outcomeFeedback),
+        evaluated_by: evaluatedBy,
+        created_at: timestamp
+      });
+    });
+
+    runPersist();
+    return mapTrustAssessment(getTrustAssessmentByTransactionId.get(transactionId));
+  }
+
   const runAutoReleaseTransaction = db.transaction((timestampIso) => {
     const rows = findEligibleAutoReleaseIds.all(timestampIso);
     const releasedIds = [];
@@ -1046,7 +1892,16 @@ export function createTransactionStore({
       return listListings.all().map(mapListing);
     },
 
-    createAcceptedTransaction({ id, buyerId, sellerId, amountCents, acceptedAt, actorId }) {
+    createAcceptedTransaction({
+      id,
+      buyerId,
+      sellerId,
+      amountCents,
+      acceptedAt,
+      actorId,
+      deviceFingerprint,
+      paymentFingerprint
+    }) {
       if (!id || !buyerId || !sellerId) {
         throw new StoreError(
           "validation",
@@ -1136,14 +1991,104 @@ export function createTransactionStore({
             }
           ]
         });
+
+        const sellerAreaRow = getSellerPrimaryLocalArea.get({ seller_id: sellerId });
+        const sellerArea = sellerAreaRow?.local_area ?? null;
+        const derivedDeviceFingerprint =
+          normalizeEntityKey(deviceFingerprint) || `device:${hashSha256Hex(buyerId).slice(0, 16)}`;
+        const derivedPaymentFingerprint =
+          normalizeEntityKey(paymentFingerprint) ||
+          `payment:${hashSha256Hex(`${buyerId}:${sellerId}`).slice(0, 16)}`;
+
+        linkTransactionRiskEntity({
+          transactionId: id,
+          entityType: "user",
+          entityKey: `buyer:${buyerId}`,
+          source: "transaction_acceptance",
+          confidence: 1,
+          createdAt: timestamp
+        });
+        linkTransactionRiskEntity({
+          transactionId: id,
+          entityType: "user",
+          entityKey: `seller:${sellerId}`,
+          source: "transaction_acceptance",
+          confidence: 1,
+          createdAt: timestamp
+        });
+        if (sellerArea) {
+          linkTransactionRiskEntity({
+            transactionId: id,
+            entityType: "listing",
+            entityKey: `local_area:${sellerArea}`,
+            source: "seller_listing_area",
+            confidence: 0.9,
+            createdAt: timestamp
+          });
+        }
+        linkTransactionRiskEntity({
+          transactionId: id,
+          entityType: "device",
+          entityKey: derivedDeviceFingerprint,
+          source: deviceFingerprint ? "request.deviceFingerprint" : "derived.buyer",
+          confidence: deviceFingerprint ? 1 : 0.55,
+          createdAt: timestamp
+        });
+        linkTransactionRiskEntity({
+          transactionId: id,
+          entityType: "payment_fingerprint",
+          entityKey: derivedPaymentFingerprint,
+          source: paymentFingerprint ? "request.paymentFingerprint" : "derived.participant_pair",
+          confidence: paymentFingerprint ? 1 : 0.6,
+          createdAt: timestamp
+        });
       });
       runCreateTransaction();
+      evaluateTrustForExistingTransaction({
+        transactionId: id,
+        evaluatedBy: actorId ?? sellerId
+      });
 
       return mapTransaction(getTransactionByIdQuery.get(id));
     },
 
     getTransactionById(id) {
       return mapTransaction(getTransactionByIdQuery.get(id));
+    },
+
+    evaluateTrustAssessment({ transactionId, evaluatedBy, evaluatedAt }) {
+      if (!transactionId || typeof transactionId !== "string" || !transactionId.trim()) {
+        throw new StoreError("validation", "transactionId is required");
+      }
+      if (!evaluatedBy || typeof evaluatedBy !== "string" || !evaluatedBy.trim()) {
+        throw new StoreError("validation", "evaluatedBy is required");
+      }
+      return evaluateTrustForExistingTransaction({
+        transactionId: transactionId.trim(),
+        evaluatedBy: evaluatedBy.trim(),
+        evaluatedAt
+      });
+    },
+
+    getTrustAssessment({ transactionId }) {
+      const transaction = getTransactionByIdQuery.get(transactionId);
+      if (!transaction) {
+        throw new StoreError("not_found", "transaction not found");
+      }
+      return mapTrustAssessment(getTrustAssessmentByTransactionId.get(transactionId));
+    },
+
+    listTrustInterventions({ transactionId, limit = 20 }) {
+      const transaction = getTransactionByIdQuery.get(transactionId);
+      if (!transaction) {
+        throw new StoreError("not_found", "transaction not found");
+      }
+      if (!Number.isInteger(limit) || limit <= 0 || limit > 200) {
+        throw new StoreError("validation", "limit must be an integer between 1 and 200");
+      }
+      return listTrustInterventionsByTransactionId
+        .all({ transaction_id: transactionId, limit })
+        .map(mapTrustIntervention);
     },
 
     getTransactionEventHistory({ id }) {
@@ -1577,6 +2522,10 @@ export function createTransactionStore({
         });
       });
       runConfirmDelivery();
+      evaluateTrustForExistingTransaction({
+        transactionId: id,
+        evaluatedBy: buyerId
+      });
 
       return mapTransaction(getTransactionByIdQuery.get(id));
     },
@@ -1648,6 +2597,17 @@ export function createTransactionStore({
         });
       });
       runOpenDispute();
+      linkTransactionRiskEntity({
+        transactionId: id,
+        entityType: "dispute_entity",
+        entityKey: `opened_by:${actorId}`,
+        source: "dispute_opened",
+        confidence: 1
+      });
+      evaluateTrustForExistingTransaction({
+        transactionId: id,
+        evaluatedBy: actorId
+      });
 
       return mapTransaction(getTransactionByIdQuery.get(id));
     },
@@ -1706,6 +2666,17 @@ export function createTransactionStore({
         });
       });
       runResolveDispute();
+      linkTransactionRiskEntity({
+        transactionId: id,
+        entityType: "dispute_entity",
+        entityKey: "resolved_by:admin",
+        source: "dispute_resolved",
+        confidence: 1
+      });
+      evaluateTrustForExistingTransaction({
+        transactionId: id,
+        evaluatedBy: "admin"
+      });
 
       return mapTransaction(getTransactionByIdQuery.get(id));
     },
@@ -1818,6 +2789,17 @@ export function createTransactionStore({
         });
       });
       runAdjudicateDispute();
+      linkTransactionRiskEntity({
+        transactionId: id,
+        entityType: "dispute_entity",
+        entityKey: `adjudication:${decision}`,
+        source: "dispute_adjudicated",
+        confidence: 1
+      });
+      evaluateTrustForExistingTransaction({
+        transactionId: id,
+        evaluatedBy: decidedBy.trim()
+      });
 
       return mapTransaction(getTransactionByIdQuery.get(id));
     },
@@ -1825,9 +2807,17 @@ export function createTransactionStore({
     runAutoRelease({ nowAt } = {}) {
       const cutoff = nowAt ? toIsoString(nowAt) : now().toISOString();
       const releasedIds = runAutoReleaseTransaction(cutoff);
+      for (const transactionId of releasedIds) {
+        evaluateTrustForExistingTransaction({
+          transactionId,
+          evaluatedBy: "system:auto_release",
+          evaluatedAt: cutoff
+        });
+      }
       return {
         releasedCount: releasedIds.length,
         releasedTransactionIds: releasedIds,
+        trustEvaluatedCount: releasedIds.length,
         ranAt: cutoff
       };
     }

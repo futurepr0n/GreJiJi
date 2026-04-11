@@ -1,7 +1,7 @@
 ---
 title: GreJiJi API Reference
 author: PaperclipAI Documentation Expert
-date: 2026-04-09
+date: 2026-04-11
 status: current
 ---
 
@@ -18,6 +18,7 @@ GreJiJi is a Node.js + SQLite backend for local marketplace escrow, disputes, an
 - [Authentication model](#authentication-model)
 - [Core workflow](#core-workflow)
 - [Endpoint reference](#endpoint-reference)
+- [Trust assessment model](#trust-assessment-model)
 - [Event and outbox model](#event-and-outbox-model)
 - [Notification dispatch and inbox APIs](#notification-dispatch-and-inbox-apis)
 - [Error semantics](#error-semantics)
@@ -191,7 +192,9 @@ Example seller-authenticated request:
   "transactionId": "txn-100",
   "buyerId": "buyer-1",
   "amountCents": 12000,
-  "acceptedAt": "2026-04-09T12:00:00.000Z"
+  "acceptedAt": "2026-04-09T12:00:00.000Z",
+  "deviceFingerprint": "ios-17|iphone14|fp-abcd",
+  "paymentFingerprint": "card-bin-424242|issuer-us|fp-xyz"
 }
 ```
 
@@ -201,8 +204,24 @@ Required server-side invariants:
 - `amountCents` must be a positive integer.
 - `autoReleaseDueAt` is computed automatically.
 - `serviceFee`, `totalBuyerCharge`, `sellerNet`, and `currency` are persisted at creation and returned on read APIs.
+- Optional `deviceFingerprint` and `paymentFingerprint` can be supplied to improve abuse-graph linkage quality.
 - Settlement outcomes (`completed`, `refunded`, `cancelled`) persist immutable final snapshot fields:
   `settledBuyerCharge`, `settledSellerPayout`, and `settledPlatformFee`.
+
+Trust payloads now include:
+
+- `graphSignals` for abuse-neighborhood scoring across user/listing/device/payment/dispute entities.
+- `evidenceProvenance` with immutable snapshot id/hash and lineage metadata.
+- `outcomeFeedback` with bounded threshold calibration metadata.
+- `explainability` with top risk paths, contribution percentages, and confidence decomposition for reviewer rationale.
+- `identityFriction` with policy versioning, adaptive requirements, escalation level, and decision trace.
+- `postIncidentVerification` with outcome drift metrics, regression flags, and actionable alert codes.
+- `fraudRingDisruption` with multi-hop ring metrics, disruption score/band, and investigator artifacts.
+- `escrowAdversarialSimulation` with coordinated attack scenarios, severity scores, and guardrail recommendations.
+- `trustPolicyRollback` with autonomous rollback trigger state, pressure score, threshold deltas, and rollback artifacts.
+- `accountTakeoverContainment` with correlated device/payment takeover scoring, graduated containment mode, and investigator evidence trails.
+- `settlementRiskStressControls` with delayed-delivery, reversal-wave, and coordinated dispute-burst scenarios plus severity/confidence outputs.
+- `policyCanaryGovernance` with canary cohort stages, degradation pressure, promote/hold/revert decisions, and rollback runbook references.
 
 #### `GET /transactions/:transactionId`
 
@@ -211,6 +230,28 @@ Visible to participants or admins only.
 #### `GET /transactions/:transactionId/events`
 
 Visible to participants or admins only. Returns chronological lifecycle history ordered by `occurredAt ASC, id ASC`.
+
+#### `GET /transactions/:transactionId/trust`
+
+Visible to participants or admins only.
+
+Response includes:
+
+- `trustAssessment`: latest persisted assessment snapshot for the transaction
+- `trustInterventions`: ordered intervention history including recommended controls, provenance refs, and v16 canary/containment fields
+
+#### `POST /transactions/:transactionId/trust/evaluate`
+
+Admin-only. Re-runs trust evaluation and appends a fresh intervention snapshot.
+
+Optional request body:
+
+```json
+{
+  "evaluatedBy": "admin-1",
+  "evaluatedAt": "2026-04-11T12:00:00.000Z"
+}
+```
 
 #### `POST /transactions/:transactionId/confirm-delivery`
 
@@ -386,6 +427,62 @@ Supported topics:
 - `payment_received`
 - `action_required`
 - `dispute_update`
+
+## Trust assessment model
+
+Trust responses are versioned under `orchestrationVersion`. The current implementation emits `trust-ops-v16`.
+
+> [!NOTE]
+> The same v16 payload family is returned on transaction create/read flows and the dedicated trust route `GET /transactions/:transactionId/trust`.
+
+### High-level shape
+
+```json
+{
+  "trustAssessment": {
+    "orchestrationVersion": "trust-ops-v16",
+    "riskBand": "medium",
+    "confidenceBand": "medium",
+    "accountTakeoverContainment": {
+      "containmentBand": "medium",
+      "containmentMode": "guarded_containment",
+      "recommendedActions": ["session_risk_annotation", "step_up_credential_reset"]
+    },
+    "settlementRiskStressControls": {
+      "simulationMode": "delayed_delivery_reversal_dispute_burst",
+      "maxScenarioSeverity": 58,
+      "simulationConfidenceBand": "medium"
+    },
+    "policyCanaryGovernance": {
+      "rolloutDecision": "hold",
+      "autoReverted": false,
+      "cohortPlan": { "stage0Percent": 5, "stage1Percent": 20, "stage2Percent": 40 }
+    }
+  }
+}
+```
+
+### v16 domain components
+
+| Field | Purpose | Notable nested outputs |
+| --- | --- | --- |
+| `accountTakeoverContainment` | Correlates shared device/payment transitions across linked entities and recommends graduated containment. | `correlationScore`, `containmentBand`, `containmentMode`, `recommendedActions`, `investigatorEvidenceTrail` |
+| `settlementRiskStressControls` | Simulates delayed-delivery, reversal-wave, and coordinated dispute-burst stress against escrow cohorts. | `stressScenarios`, `maxScenarioSeverity`, `simulationConfidenceBand`, `projectedLossBps`, `recommendedControls` |
+| `policyCanaryGovernance` | Governs guarded policy rollout with automatic hold/revert behavior when degradation pressure breaches thresholds. | `rolloutDecision`, `autoReverted`, `degradationPressure`, `rollbackThresholds`, `cohortPlan`, `guardrailActions` |
+
+### Persistence and migrations
+
+- Migration `migrations/012_trust_operations_v16.sql` adds `account_takeover_containment_json`, `settlement_risk_stress_controls_json`, and `policy_canary_governance_json` to both `trust_assessments` and `trust_interventions`.
+- Trust assessment reads expose the latest snapshot, while `trustInterventions` returns the historical decision trail attached to the transaction.
+- Backward-compatible exports for v12-v15 call the same v16 evaluator, but newly persisted rows are stamped as `trust-ops-v16`.
+
+### Operator interpretation
+
+- `rolloutDecision = promote` means the canary stayed beneath degradation pressure thresholds and may advance to the next cohort.
+- `rolloutDecision = hold` means extend observation while preserving current thresholds and cohort limits.
+- `rolloutDecision = revert` means rollback guardrails triggered automatically or regression pressure was high enough to force a canary revert.
+- High `accountTakeoverContainment.correlationScore` should be read with its `investigatorEvidenceTrail` before freezing linked entities.
+- High `settlementRiskStressControls.maxScenarioSeverity` indicates settlement operations should favor manual release confirmation and reversal buffers.
 
 Outbox dispatch metadata:
 
