@@ -73,7 +73,16 @@ export function renderWebAppPage() {
           <label>Description <textarea name="description" rows="3"></textarea></label>
           <label>Price (cents) <input required name="priceCents" type="number" min="1" step="1" /></label>
           <label>Local area <input required name="localArea" /></label>
+          <label>Photo URLs (one per line) <textarea name="photoUrls" rows="3" placeholder="https://example.com/photo-1.jpg"></textarea></label>
           <button type="submit">Create listing</button>
+        </form>
+
+        <form id="listing-photo-upload-form" class="card role-seller" hidden>
+          <h3>Seller: upload listing photo</h3>
+          <label>Listing ID <input required name="listingId" placeholder="listing-id" /></label>
+          <label>Photo ID <input name="photoId" placeholder="optional-photo-id" /></label>
+          <label>File <input required name="file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" /></label>
+          <button type="submit">Upload photo</button>
         </form>
       </section>
 

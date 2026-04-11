@@ -13,6 +13,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const defaultDatabasePath = path.join(__dirname, "..", "data", "grejiji.sqlite");
 const defaultEvidenceStoragePath = path.join(__dirname, "..", "data", "dispute-evidence");
+const defaultListingPhotoStoragePath = path.join(__dirname, "..", "data", "listing-photos");
 const migrationsDirectory = path.join(__dirname, "..", "migrations");
 const webClientFilePath = path.join(__dirname, "web", "client.js");
 const webStylesFilePath = path.join(__dirname, "web", "styles.css");
@@ -23,6 +24,7 @@ const nodeEnv = process.env.NODE_ENV ?? "development";
 const authTokenSecret = process.env.AUTH_TOKEN_SECRET ?? "local-dev-secret-change-me";
 const tokenTtlSeconds = Number(process.env.AUTH_TOKEN_TTL_SECONDS ?? 60 * 60 * 12);
 const evidenceMaxBytes = Number(process.env.EVIDENCE_MAX_BYTES ?? 5 * 1024 * 1024);
+const listingPhotoMaxBytes = Number(process.env.LISTING_PHOTO_MAX_BYTES ?? 8 * 1024 * 1024);
 const defaultBodyMaxBytes = Number(process.env.REQUEST_BODY_MAX_BYTES ?? 1024 * 1024);
 const requestLogEnabled = String(process.env.REQUEST_LOG_ENABLED ?? "true") !== "false";
 const errorEventLogFile = process.env.ERROR_EVENT_LOG_FILE ?? null;
@@ -476,6 +478,7 @@ function getRateLimitPolicy(method, pathname) {
   if (
     (method === "POST" && pathname === "/listings") ||
     (method === "PATCH" && /^\/listings\/[^/]+$/.test(pathname)) ||
+    (method === "POST" && /^\/listings\/[^/]+\/photos$/.test(pathname)) ||
     (method === "POST" && /^\/listings\/[^/]+\/abuse-reports$/.test(pathname))
   ) {
     return { key: "listingsWrite", max: routeRateLimits.listingsWrite };
@@ -528,6 +531,12 @@ function getRouteMetricLabels(method, pathname) {
   }
   if (method === "PATCH" && /^\/listings\/[^/]+$/.test(pathname)) {
     return { pathTemplate: "/listings/:id", flow: "listing.update", coreFlow: true };
+  }
+  if (method === "POST" && /^\/listings\/[^/]+\/photos$/.test(pathname)) {
+    return { pathTemplate: "/listings/:id/photos", flow: "listing.photo_upload", coreFlow: true };
+  }
+  if (method === "GET" && /^\/listings\/[^/]+\/photos\/[^/]+$/.test(pathname)) {
+    return { pathTemplate: "/listings/:id/photos/:photoId", flow: "listing.photo_read", coreFlow: false };
   }
   if (method === "POST" && /^\/listings\/[^/]+\/abuse-reports$/.test(pathname)) {
     return { pathTemplate: "/listings/:id/abuse-reports", flow: "listing.abuse_report", coreFlow: true };
@@ -935,6 +944,21 @@ function requireAuth(req, store) {
   }
 
   return user;
+}
+
+function getOptionalAuthUser(req, store) {
+  const token = getBearerToken(req);
+  if (!token) {
+    return null;
+  }
+
+  const tokenPayload = verifyToken(token);
+  if (!tokenPayload) {
+    return null;
+  }
+
+  const user = store.getUserById(tokenPayload.sub);
+  return user ?? null;
 }
 
 function requireRole(user, role) {
@@ -1573,6 +1597,43 @@ function guessMimeTypeFromFileName(fileName) {
   return null;
 }
 
+const allowedListingPhotoMimeTypes = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif"
+]);
+
+function normalizeListingPhotoUrls(value) {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new StoreError("validation", "photoUrls must be an array of URLs");
+  }
+  const urls = [];
+  for (const item of value) {
+    const candidate = String(item ?? "").trim();
+    if (!candidate) {
+      continue;
+    }
+    let parsed;
+    try {
+      parsed = new URL(candidate);
+    } catch {
+      throw new StoreError("validation", "photoUrls entries must be valid URLs");
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new StoreError("validation", "photoUrls must use http or https");
+    }
+    urls.push(parsed.toString());
+  }
+  if (urls.length > 12) {
+    throw new StoreError("validation", "photoUrls cannot include more than 12 entries");
+  }
+  return Array.from(new Set(urls));
+}
+
 function evaluateEvidenceMetadataConsistency({ fileName, mimeType }) {
   const expectedMime = guessMimeTypeFromFileName(fileName);
   if (!expectedMime) {
@@ -1779,6 +1840,7 @@ export function createServer({
   serviceFeePercent,
   settlementCurrency,
   evidenceStoragePath,
+  listingPhotoStoragePath,
   paymentProviderName,
   stripeSecretKey,
   stripeApiBaseUrl,
@@ -1795,7 +1857,12 @@ export function createServer({
 } = {}) {
   const resolvedEvidenceStoragePath =
     evidenceStoragePath ?? process.env.EVIDENCE_STORAGE_PATH ?? defaultEvidenceStoragePath;
+  const resolvedListingPhotoStoragePath =
+    listingPhotoStoragePath ??
+    process.env.LISTING_PHOTO_STORAGE_PATH ??
+    defaultListingPhotoStoragePath;
   const resolvedEvidenceMaxBytes = parseEvidenceMaxBytes(evidenceMaxBytes);
+  const resolvedListingPhotoMaxBytes = parseEvidenceMaxBytes(listingPhotoMaxBytes);
   const store = createTransactionStore({
     databasePath: databasePath ?? process.env.DATABASE_PATH ?? defaultDatabasePath,
     migrationsDirectory,
@@ -2492,6 +2559,47 @@ export function createServer({
         return;
       }
 
+      if (req.method === "GET") {
+        const listingPhotoDownloadParams = getPathParams(
+          url.pathname,
+          /^\/listings\/([^/]+)\/photos\/([^/]+)$/
+        );
+        if (listingPhotoDownloadParams) {
+          const [listingId, photoId] = listingPhotoDownloadParams;
+          assertSafeId(listingId, "listingId");
+          assertSafeId(photoId, "photoId");
+          const user = getOptionalAuthUser(req, store);
+          const { listing, photo } = store.getListingUploadedPhotoStorage({
+            listingId,
+            photoId
+          });
+          const canRead =
+            listing.moderationStatus === "approved" ||
+            (user && (user.role === "admin" || user.id === listing.sellerId));
+          if (!canRead) {
+            throw new StoreError("forbidden", "listing photo is not available");
+          }
+          const filePath = path.join(resolvedListingPhotoStoragePath, photo.storageKey);
+          let data;
+          try {
+            data = await fs.readFile(filePath);
+          } catch (error) {
+            if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+              throw new StoreError("not_found", "listing photo file not found");
+            }
+            throw error;
+          }
+          res.writeHead(200, {
+            "Content-Type": photo.mimeType,
+            "Content-Length": String(data.length),
+            "Cache-Control": "public, max-age=3600",
+            "Content-Disposition": `inline; filename=\"${sanitizeFileName(photo.originalFileName)}\"`
+          });
+          res.end(data);
+          return;
+        }
+      }
+
       if (req.method === "GET" && url.pathname === "/notifications") {
         const currentUser = requireAuth(req, store);
         const limitRaw = url.searchParams.get("limit");
@@ -2511,6 +2619,7 @@ export function createServer({
 
         const body = await readJsonBody(req);
         assertSafeId(body.listingId, "listingId");
+        const photoUrls = normalizeListingPhotoUrls(body.photoUrls);
         const moderationAutomation = evaluateLaunchControl({
           key: "moderation_auto_actions",
           userId: currentUser.id,
@@ -2545,6 +2654,7 @@ export function createServer({
           category: body.category,
           itemCondition: body.itemCondition,
           localArea: body.localArea,
+          photoUrls,
           moderationStatus: policy.moderationStatus,
           moderationReasonCode: policy.reasonCode,
           moderationPublicReason: policy.publicReason,
@@ -2570,6 +2680,10 @@ export function createServer({
           const [listingId] = listingParams;
           assertSafeId(listingId, "listingId");
           const body = await readJsonBody(req);
+          const photoUrls =
+            body.photoUrls === undefined
+              ? undefined
+              : normalizeListingPhotoUrls(body.photoUrls);
           const moderationAutomation = evaluateLaunchControl({
             key: "moderation_auto_actions",
             userId: currentUser.id,
@@ -2605,6 +2719,7 @@ export function createServer({
             category: body.category,
             itemCondition: body.itemCondition,
             localArea: body.localArea,
+            photoUrls,
             moderationStatus: policy.moderationStatus,
             moderationReasonCode: policy.reasonCode,
             moderationPublicReason: policy.publicReason,
@@ -2622,6 +2737,78 @@ export function createServer({
       }
 
       if (req.method === "POST") {
+        const listingPhotoUploadParams = getPathParams(
+          url.pathname,
+          /^\/listings\/([^/]+)\/photos$/
+        );
+        if (listingPhotoUploadParams) {
+          const currentUser = requireAuth(req, store);
+          ensureAccountRiskAllowsWrite(currentUser);
+          requireRole(currentUser, "seller");
+          const [listingId] = listingPhotoUploadParams;
+          assertSafeId(listingId, "listingId");
+          const body = await readJsonBody(req);
+          if (!body.fileName || typeof body.fileName !== "string" || !body.fileName.trim()) {
+            throw new StoreError("validation", "fileName is required");
+          }
+          if (body.fileName.length > 255) {
+            throw new StoreError("validation", "fileName must be 255 characters or fewer");
+          }
+          if (!body.mimeType || typeof body.mimeType !== "string" || !body.mimeType.trim()) {
+            throw new StoreError("validation", "mimeType is required");
+          }
+          const normalizedMimeType = body.mimeType.trim().toLowerCase();
+          if (!allowedListingPhotoMimeTypes.has(normalizedMimeType)) {
+            throw new StoreError("validation", "unsupported listing photo mimeType");
+          }
+          const content = parseBase64Content(body.contentBase64);
+          if (content.length > resolvedListingPhotoMaxBytes) {
+            throw new StoreError(
+              "validation",
+              `listing photo exceeds LISTING_PHOTO_MAX_BYTES (${resolvedListingPhotoMaxBytes})`
+            );
+          }
+
+          const checksumSha256 = crypto.createHash("sha256").update(content).digest("hex");
+          if (body.checksumSha256 && body.checksumSha256 !== checksumSha256) {
+            throw new StoreError("validation", "checksumSha256 does not match content");
+          }
+
+          const photoId = body.photoId ?? crypto.randomUUID();
+          assertSafeId(photoId, "photoId");
+          const safeName = sanitizeFileName(body.fileName.trim());
+          const storageKey = path.join(listingId, `${photoId}-${safeName}`);
+          const filePath = path.join(resolvedListingPhotoStoragePath, storageKey);
+          await fs.mkdir(path.dirname(filePath), { recursive: true });
+          await fs.writeFile(filePath, content, { flag: "wx" });
+          const createdAt = new Date().toISOString();
+          let listing;
+          try {
+            listing = store.appendListingUploadedPhoto({
+              listingId,
+              sellerId: currentUser.id,
+              photo: {
+                id: photoId,
+                originalFileName: body.fileName.trim(),
+                mimeType: normalizedMimeType,
+                sizeBytes: content.length,
+                checksumSha256,
+                storageKey,
+                downloadUrl: `/listings/${encodeURIComponent(listingId)}/photos/${encodeURIComponent(photoId)}`,
+                createdAt
+              }
+            });
+          } catch (error) {
+            await fs.rm(filePath, { force: true });
+            throw error;
+          }
+          invalidateListingsCache();
+          const uploadedPhoto =
+            listing.uploadedPhotos.find((item) => item.id === photoId) ?? null;
+          sendJson(res, 201, { listing, photo: uploadedPhoto });
+          return;
+        }
+
         const listingAbuseReportParams = getPathParams(
           url.pathname,
           /^\/listings\/([^/]+)\/abuse-reports$/

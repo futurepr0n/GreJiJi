@@ -321,6 +321,31 @@ function mapListing(row) {
   const moderationStatus = VALID_LISTING_MODERATION_STATUSES.has(row.moderation_status)
     ? row.moderation_status
     : "approved";
+  const photoUrls = parseJsonArrayOrEmpty(row.listing_photo_urls_json)
+    .map((item) => String(item ?? "").trim())
+    .filter(Boolean);
+  const uploadedPhotos = parseJsonArrayOrEmpty(row.listing_uploaded_photos_json)
+    .filter((item) => item && typeof item === "object")
+    .map((item) => ({
+      id: String(item.id ?? "").trim(),
+      originalFileName: String(item.originalFileName ?? "").trim(),
+      mimeType: String(item.mimeType ?? "").trim(),
+      sizeBytes: Number(item.sizeBytes ?? 0),
+      checksumSha256: String(item.checksumSha256 ?? "").trim(),
+      downloadUrl: String(item.downloadUrl ?? "").trim(),
+      createdAt: item.createdAt ?? null
+    }))
+    .filter((item) => {
+      return (
+        item.id &&
+        item.originalFileName &&
+        item.mimeType &&
+        Number.isInteger(item.sizeBytes) &&
+        item.sizeBytes >= 0 &&
+        item.checksumSha256 &&
+        item.downloadUrl
+      );
+    });
   return {
     id: row.id,
     sellerId: row.seller_id,
@@ -335,6 +360,8 @@ function mapListing(row) {
     moderationPublicReason: row.moderation_public_reason ?? null,
     moderationUpdatedAt: row.moderation_updated_at ?? null,
     moderationUpdatedBy: row.moderation_updated_by ?? null,
+    photoUrls,
+    uploadedPhotos,
     sellerFeedback:
       moderationStatus === "approved"
         ? null
@@ -394,6 +421,19 @@ function parseJsonOrEmpty(value) {
     return JSON.parse(value);
   } catch {
     return {};
+  }
+}
+
+function parseJsonArrayOrEmpty(value) {
+  if (!value) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
   }
 }
 
@@ -3604,6 +3644,8 @@ export function createTransactionStore({
       category,
       item_condition,
       local_area,
+      listing_photo_urls_json,
+      listing_uploaded_photos_json,
       moderation_status,
       moderation_reason_code,
       moderation_public_reason,
@@ -3621,6 +3663,8 @@ export function createTransactionStore({
       @category,
       @item_condition,
       @local_area,
+      @listing_photo_urls_json,
+      @listing_uploaded_photos_json,
       @moderation_status,
       @moderation_reason_code,
       @moderation_public_reason,
@@ -3679,12 +3723,20 @@ export function createTransactionStore({
       category = @category,
       item_condition = @item_condition,
       local_area = @local_area,
+      listing_photo_urls_json = @listing_photo_urls_json,
       moderation_status = @moderation_status,
       moderation_reason_code = @moderation_reason_code,
       moderation_public_reason = @moderation_public_reason,
       moderation_internal_notes = @moderation_internal_notes,
       moderation_updated_at = @moderation_updated_at,
       moderation_updated_by = @moderation_updated_by,
+      updated_at = @updated_at
+    WHERE id = @id
+  `);
+  const updateListingUploadedPhotosStatement = db.prepare(`
+    UPDATE listings
+    SET
+      listing_uploaded_photos_json = @listing_uploaded_photos_json,
       updated_at = @updated_at
     WHERE id = @id
   `);
@@ -9570,6 +9622,8 @@ export function createTransactionStore({
       category,
       itemCondition,
       localArea,
+      photoUrls = [],
+      uploadedPhotos = [],
       moderationStatus = "approved",
       moderationReasonCode = null,
       moderationPublicReason = null,
@@ -9611,6 +9665,14 @@ export function createTransactionStore({
             category: category ? String(category).trim() : null,
             item_condition: itemCondition ? String(itemCondition).trim() : null,
             local_area: localArea.trim(),
+            listing_photo_urls_json: JSON.stringify(
+              Array.isArray(photoUrls)
+                ? photoUrls.map((item) => String(item ?? "").trim()).filter(Boolean)
+                : []
+            ),
+            listing_uploaded_photos_json: JSON.stringify(
+              Array.isArray(uploadedPhotos) ? uploadedPhotos : []
+            ),
             moderation_status: moderationStatus,
             moderation_reason_code: moderationReasonCode ?? null,
             moderation_public_reason: moderationPublicReason ?? null,
@@ -9655,6 +9717,7 @@ export function createTransactionStore({
       category,
       itemCondition,
       localArea,
+      photoUrls,
       moderationStatus = "approved",
       moderationReasonCode = null,
       moderationPublicReason = null,
@@ -9689,6 +9752,11 @@ export function createTransactionStore({
       }
 
       const timestamp = now().toISOString();
+      const normalizedPhotoUrls = Array.isArray(photoUrls)
+        ? photoUrls.map((item) => String(item ?? "").trim()).filter(Boolean)
+        : parseJsonArrayOrEmpty(existing.listing_photo_urls_json)
+            .map((item) => String(item ?? "").trim())
+            .filter(Boolean);
       const runUpdateListing = db.transaction(() => {
         const result = updateListingStatement.run({
           id,
@@ -9698,6 +9766,7 @@ export function createTransactionStore({
           category: category ? String(category).trim() : null,
           item_condition: itemCondition ? String(itemCondition).trim() : null,
           local_area: localArea.trim(),
+          listing_photo_urls_json: JSON.stringify(normalizedPhotoUrls),
           moderation_status: moderationStatus,
           moderation_reason_code: moderationReasonCode ?? null,
           moderation_public_reason: moderationPublicReason ?? null,
@@ -9728,6 +9797,95 @@ export function createTransactionStore({
       runUpdateListing();
 
       return mapListing(getListingById.get(id));
+    },
+
+    appendListingUploadedPhoto({ listingId, sellerId, photo }) {
+      if (!listingId || typeof listingId !== "string") {
+        throw new StoreError("validation", "listingId is required");
+      }
+      if (!sellerId || typeof sellerId !== "string") {
+        throw new StoreError("validation", "sellerId is required");
+      }
+      if (!photo || typeof photo !== "object") {
+        throw new StoreError("validation", "photo is required");
+      }
+      const existing = getListingById.get(listingId);
+      if (!existing) {
+        throw new StoreError("not_found", "listing not found");
+      }
+      if (existing.seller_id !== sellerId) {
+        throw new StoreError("forbidden", "only the listing seller can upload listing photos");
+      }
+      const timestamp = now().toISOString();
+      const currentPhotos = parseJsonArrayOrEmpty(existing.listing_uploaded_photos_json)
+        .filter((item) => item && typeof item === "object");
+      const normalizedPhoto = {
+        id: String(photo.id ?? "").trim(),
+        originalFileName: String(photo.originalFileName ?? "").trim(),
+        mimeType: String(photo.mimeType ?? "").trim(),
+        sizeBytes: Number(photo.sizeBytes ?? 0),
+        checksumSha256: String(photo.checksumSha256 ?? "").trim(),
+        storageKey: String(photo.storageKey ?? "").trim(),
+        downloadUrl: String(photo.downloadUrl ?? "").trim(),
+        createdAt: photo.createdAt ?? timestamp
+      };
+      if (
+        !normalizedPhoto.id ||
+        !normalizedPhoto.originalFileName ||
+        !normalizedPhoto.mimeType ||
+        !Number.isInteger(normalizedPhoto.sizeBytes) ||
+        normalizedPhoto.sizeBytes < 0 ||
+        !normalizedPhoto.checksumSha256 ||
+        !normalizedPhoto.storageKey ||
+        !normalizedPhoto.downloadUrl
+      ) {
+        throw new StoreError("validation", "uploaded photo metadata is invalid");
+      }
+      if (currentPhotos.some((item) => String(item.id ?? "") === normalizedPhoto.id)) {
+        throw new StoreError("conflict", "listing photo id already exists");
+      }
+      currentPhotos.push(normalizedPhoto);
+      const result = updateListingUploadedPhotosStatement.run({
+        id: listingId,
+        listing_uploaded_photos_json: JSON.stringify(currentPhotos),
+        updated_at: timestamp
+      });
+      if (result.changes !== 1) {
+        throw new StoreError("conflict", "failed to append listing photo");
+      }
+      return mapListing(getListingById.get(listingId));
+    },
+
+    getListingUploadedPhotoStorage({ listingId, photoId }) {
+      if (!listingId || typeof listingId !== "string") {
+        throw new StoreError("validation", "listingId is required");
+      }
+      if (!photoId || typeof photoId !== "string") {
+        throw new StoreError("validation", "photoId is required");
+      }
+      const existing = getListingById.get(listingId);
+      if (!existing) {
+        throw new StoreError("not_found", "listing not found");
+      }
+      const photos = parseJsonArrayOrEmpty(existing.listing_uploaded_photos_json)
+        .filter((item) => item && typeof item === "object");
+      const photo = photos.find((item) => String(item.id ?? "") === photoId);
+      if (!photo) {
+        throw new StoreError("not_found", "listing photo not found");
+      }
+      const storageKey = String(photo.storageKey ?? "").trim();
+      if (!storageKey) {
+        throw new StoreError("not_found", "listing photo storage not found");
+      }
+      return {
+        listing: mapListing(existing),
+        photo: {
+          id: String(photo.id ?? "").trim(),
+          originalFileName: String(photo.originalFileName ?? "").trim(),
+          mimeType: String(photo.mimeType ?? "").trim(),
+          storageKey
+        }
+      };
     },
 
     getListingById(id) {

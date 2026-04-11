@@ -91,6 +91,7 @@ GreJiJi is a Node.js + SQLite backend for local marketplace escrow, disputes, an
 | `LISTING_POLICY_PRICE_LOW_MULTIPLIER` | `0.2` | Lower ratio threshold vs seller baseline average before review |
 | `LISTING_POLICY_PRICE_BASELINE_MIN_SAMPLES` | `3` | Minimum seller listing sample size before price anomaly checks apply |
 | `LISTING_ABUSE_AUTO_HIDE_THRESHOLD` | `3` | Open abuse-report threshold that auto-hides approved listings |
+| `LISTING_PHOTO_MAX_BYTES` | `8388608` | Max upload size for `POST /listings/:listingId/photos` |
 | `REQUEST_LOG_ENABLED` | `true` | Structured JSON request logs to stdout |
 | `ERROR_EVENT_LOG_FILE` | unset | Optional JSONL file sink for request errors |
 
@@ -557,7 +558,10 @@ Request body:
   "priceCents": 25000,
   "category": "sports",
   "itemCondition": "used",
-  "localArea": "Toronto"
+  "localArea": "Toronto",
+  "photoUrls": [
+    "https://example.com/listings/bike-front.jpg"
+  ]
 }
 ```
 
@@ -566,6 +570,7 @@ Validation:
 - `title` required
 - `localArea` required
 - `priceCents` must be a positive integer
+- `photoUrls` is optional; when present it must be an array of `http`/`https` URLs (max `12`)
 - policy checks on create/update can auto-assign moderation states:
   - `approved`
   - `pending_review` (metadata incomplete or price anomaly)
@@ -576,6 +581,36 @@ Validation:
 Seller-only, and only the owning seller may update the listing.
 
 Create/update responses include `listing.sellerFeedback` when moderation is not `approved`.
+
+Listing payloads also include:
+
+- `photoUrls`: external image links attached by seller
+- `uploadedPhotos`: uploaded image metadata (`id`, `originalFileName`, `mimeType`, `sizeBytes`, `checksumSha256`, `downloadUrl`, `createdAt`)
+
+#### `POST /listings/:listingId/photos`
+
+Seller-only, and only the owning seller may upload listing photos.
+
+Request body:
+
+```json
+{
+  "photoId": "photo-1",
+  "fileName": "bike-front.png",
+  "mimeType": "image/png",
+  "contentBase64": "iVBORw0KGgoAAAANSUhEUgAA..."
+}
+```
+
+Constraints:
+
+- `mimeType` must be one of `image/jpeg`, `image/png`, `image/webp`, `image/gif`
+- file size must be `<= LISTING_PHOTO_MAX_BYTES` (default `8388608`)
+- optional `checksumSha256` is verified against uploaded content
+
+#### `GET /listings/:listingId/photos/:photoId`
+
+Returns the uploaded photo bytes. Public for approved listings; sellers/admins can also view non-approved listing photos.
 
 #### `POST /listings/:listingId/abuse-reports`
 

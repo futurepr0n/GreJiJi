@@ -91,6 +91,15 @@ function fmtDate(value) {
   return parsed.toLocaleString();
 }
 
+async function fileToBase64(file) {
+  const bytes = await file.arrayBuffer();
+  let binary = "";
+  for (const byte of new Uint8Array(bytes)) {
+    binary += String.fromCharCode(byte);
+  }
+  return window.btoa(binary);
+}
+
 function ensureTransactionLoaded() {
   if (!state.currentTransaction?.id) {
     throw new Error("load a transaction first");
@@ -127,11 +136,36 @@ function renderListingDetail() {
     return;
   }
 
+  const linkedPhotos = Array.isArray(listing.photoUrls) ? listing.photoUrls : [];
+  const uploadedPhotos = Array.isArray(listing.uploadedPhotos) ? listing.uploadedPhotos : [];
+  const linkedPhotoHtml =
+    linkedPhotos.length === 0
+      ? "<li>None</li>"
+      : linkedPhotos
+          .map(
+            (url) =>
+              `<li><a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(url)}</a></li>`
+          )
+          .join("");
+  const uploadedPhotoHtml =
+    uploadedPhotos.length === 0
+      ? "<li>None</li>"
+      : uploadedPhotos
+          .map(
+            (photo) =>
+              `<li><a href="${escapeHtml(photo.downloadUrl)}" target="_blank" rel="noreferrer">${escapeHtml(photo.originalFileName)}</a> (${escapeHtml(photo.mimeType)})</li>`
+          )
+          .join("");
+
   detailNode.innerHTML = `
     <p><strong>${escapeHtml(listing.title)}</strong> <span class="inline-badge">${escapeHtml(listing.localArea)}</span></p>
     <p>${escapeHtml(listing.description || "No description")}</p>
     <p>Seller: <code>${escapeHtml(listing.sellerId)}</code></p>
     <p>Price: <strong>${toUsdLike(listing.priceCents, "USD")}</strong> (${escapeHtml(listing.priceCents)} cents)</p>
+    <p>Photo links:</p>
+    <ul>${linkedPhotoHtml}</ul>
+    <p>Uploaded photos:</p>
+    <ul>${uploadedPhotoHtml}</ul>
     <p>Updated: ${escapeHtml(fmtDate(listing.updatedAt))}</p>
   `;
 
@@ -181,6 +215,10 @@ function renderListings() {
     button.addEventListener("click", () => {
       state.selectedListing = listing;
       state.selectedListingReputation = null;
+      if (state.user?.role === "seller" && state.user.id === listing.sellerId) {
+        const uploadForm = qs("#listing-photo-upload-form");
+        uploadForm.listingId.value = listing.id;
+      }
       renderListingDetail();
       renderListingReputation();
       log(`selected listing ${listing.id}`);
@@ -820,15 +858,49 @@ function bindEvents() {
     const form = event.currentTarget;
 
     try {
+      const photoUrls = String(form.photoUrls.value ?? "")
+        .split("\n")
+        .map((item) => item.trim())
+        .filter(Boolean);
       const payload = await apiRequest("POST", "/listings", {
         listingId: form.listingId.value || undefined,
         title: form.title.value,
         description: form.description.value,
         priceCents: Number(form.priceCents.value),
-        localArea: form.localArea.value
+        localArea: form.localArea.value,
+        photoUrls
       });
       log(`created listing ${payload.listing.id}`);
       form.reset();
+      await refreshListings();
+    } catch (error) {
+      log(error.message, "error");
+    }
+  });
+
+  qs("#listing-photo-upload-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const listingId = form.listingId.value.trim();
+    const file = form.file.files?.[0];
+    if (!file) {
+      log("select a file to upload", "error");
+      return;
+    }
+    try {
+      const payload = await apiRequest(
+        "POST",
+        `/listings/${encodeURIComponent(listingId)}/photos`,
+        {
+          photoId: form.photoId.value || undefined,
+          fileName: file.name,
+          mimeType: file.type || "application/octet-stream",
+          contentBase64: await fileToBase64(file)
+        }
+      );
+      log(`uploaded listing photo ${payload.photo?.id ?? "unknown"}`);
+      form.photoId.value = "";
+      form.file.value = "";
       await refreshListings();
     } catch (error) {
       log(error.message, "error");

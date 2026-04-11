@@ -38,6 +38,7 @@ Default local URLs:
 - `AUTH_TOKEN_TTL_SECONDS` defaults to `43200`
 - `EVIDENCE_STORAGE_PATH` defaults to `./data/dispute-evidence`
 - `EVIDENCE_MAX_BYTES` defaults to `5242880` (5 MB)
+- `LISTING_PHOTO_MAX_BYTES` defaults to `8388608` (8 MB)
 - `REQUEST_BODY_MAX_BYTES` defaults to `1048576` (1 MB JSON payload limit)
 - `SERVICE_FEE_FIXED_CENTS` defaults to `0` (flat platform fee in cents)
 - `SERVICE_FEE_PERCENT` defaults to `0` (percent fee, supports decimals like `2.5`)
@@ -64,6 +65,7 @@ Default local URLs:
 
 - user registration and login with signed bearer tokens
 - seller-owned listing creation and updates
+- listing photo support via external `photoUrls` and seller-uploaded image attachments
 - accepted transaction creation with computed auto-release deadlines
 - deterministic service-fee accounting captured at transaction creation
 - buyer confirmation flow for settlement release
