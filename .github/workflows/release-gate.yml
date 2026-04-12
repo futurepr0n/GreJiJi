@@ -106,4 +106,5 @@ jobs:
       - e2e
     steps:
       - name: Finalize release gate
-        run: echo "Release gate passed: unit, integration, and e2e suites are green."
+        run: |
+          echo "Release gate passed: unit, integration, and e2e suites are green."
