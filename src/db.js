@@ -8433,19 +8433,210 @@ export function createTransactionStore({
       return { preview, trustCase: details.trustCase };
     },
 
-    exportTrustOpsEvidenceBundle({ caseId, actorId }) {
+    exportTrustOpsEvidenceBundle({
+      caseId,
+      actorId,
+      requireDisputeArtifacts = false,
+      expectedBundleHashSha256 = null,
+      artifactHashAssertions = []
+    }) {
       const details = this.getTrustOperationsCase({ caseId, includeEvents: true });
       const normalizedActorId = String(actorId ?? "").trim();
       if (!normalizedActorId) {
         throw new StoreError("validation", "actorId is required");
       }
+      const stableSerialize = (value) => {
+        if (Array.isArray(value)) {
+          return `[${value.map((item) => stableSerialize(item)).join(",")}]`;
+        }
+        if (value && typeof value === "object") {
+          const keys = Object.keys(value).sort();
+          return `{${keys
+            .map((key) => `${JSON.stringify(key)}:${stableSerialize(value[key])}`)
+            .join(",")}}`;
+        }
+        return JSON.stringify(value);
+      };
+      const hashValue = (value) => createHash("sha256").update(stableSerialize(value)).digest("hex");
+
       const transaction = mapTransaction(getTransactionByIdQuery.get(details.trustCase.transactionId));
       if (!transaction) {
         throw new StoreError("not_found", "transaction not found");
       }
+      const disputeEvidence = this.listDisputeEvidence({
+        transactionId: details.trustCase.transactionId
+      });
+      const fulfillmentProofs = this.listFulfillmentProofs({
+        transactionId: details.trustCase.transactionId,
+        limit: 250
+      });
+      const payoutReleaseDecisions = transaction.sellerId
+        ? this.listRiskLimitDecisions({
+            userId: transaction.sellerId,
+            checkpoint: "payout_release",
+            limit: 50
+          })
+        : [];
+      const initiationDecisions = transaction.buyerId
+        ? this.listRiskLimitDecisions({
+            userId: transaction.buyerId,
+            checkpoint: "transaction_initiation",
+            limit: 50
+          })
+        : [];
+      if (requireDisputeArtifacts && disputeEvidence.length === 0 && fulfillmentProofs.length === 0) {
+        throw new StoreError(
+          "conflict",
+          "missing dispute artifacts: require dispute evidence or fulfillment proof before export"
+        );
+      }
+
+      const policySimulationOutcomes = details.events
+        .filter((event) => event.eventType === "policy_simulated")
+        .map((event) => ({
+          eventId: event.id,
+          reasonCode: event.reasonCode,
+          details: event.details,
+          createdAt: event.createdAt
+        }));
+      const escrowAttestationCheckpoints = details.disputePreemptionActions
+        .filter((action) =>
+          ["conditional_hold_checkpoint", "conditional_release_checkpoint"].includes(action.actionType)
+        )
+        .map((action) => ({
+          actionId: action.id,
+          checkpoint: action.actionType,
+          status: action.status,
+          reasonCode: action.reasonCode,
+          auditChainHash: action.auditChainHash,
+          createdAt: action.createdAt
+        }));
+      const contextBundles = {
+        assessment: {
+          collusionSignals: details.networkLinks,
+          listingAuthenticitySignals: details.listingAuthenticitySignals,
+          buyerRiskSignals: details.buyerRiskSignals,
+          policySimulationOutcomes
+        },
+        intervention: {
+          rationale: {
+            reasonCode: details.trustCase.reasonCode,
+            severity: details.trustCase.severity,
+            recommendedAction: details.trustCase.recommendedAction,
+            payoutAction: details.trustCase.payoutAction
+          },
+          decisionBoundary:
+            details.trustCase.payoutDecision?.machineHumanDecisionBoundary ?? {},
+          remediationActions: details.remediationActions,
+          disputePreemptionActions: details.disputePreemptionActions
+        },
+        dispute: {
+          escrowAttestationCheckpoints,
+          disputeEvidence,
+          fulfillmentProofs,
+          riskCheckpointDecisions: {
+            transactionInitiation: initiationDecisions,
+            payoutRelease: payoutReleaseDecisions
+          }
+        }
+      };
+
+      const artifactHashes = [];
+      for (const signal of details.listingAuthenticitySignals) {
+        artifactHashes.push({
+          artifactType: "listing_authenticity_signal",
+          artifactId: String(signal.id),
+          checkpoint: "assessment",
+          hashSha256: hashValue(signal)
+        });
+      }
+      for (const signal of details.buyerRiskSignals) {
+        artifactHashes.push({
+          artifactType: "buyer_risk_signal",
+          artifactId: String(signal.id),
+          checkpoint: "assessment",
+          hashSha256: hashValue(signal)
+        });
+      }
+      for (const link of details.networkLinks) {
+        artifactHashes.push({
+          artifactType: "network_link",
+          artifactId: String(link.id),
+          checkpoint: "assessment",
+          hashSha256: hashValue(link)
+        });
+      }
+      for (const action of details.remediationActions) {
+        artifactHashes.push({
+          artifactType: "remediation_action",
+          artifactId: String(action.id),
+          checkpoint: "intervention",
+          hashSha256: action.auditChainHash || hashValue(action)
+        });
+      }
+      for (const action of details.disputePreemptionActions) {
+        const checkpoint =
+          action.actionType === "conditional_hold_checkpoint" ||
+          action.actionType === "conditional_release_checkpoint"
+            ? action.actionType
+            : "intervention";
+        artifactHashes.push({
+          artifactType: "dispute_preemption_action",
+          artifactId: String(action.id),
+          checkpoint,
+          hashSha256: action.auditChainHash || hashValue(action)
+        });
+      }
+      for (const evidence of disputeEvidence) {
+        artifactHashes.push({
+          artifactType: "dispute_evidence",
+          artifactId: String(evidence.id),
+          checkpoint: "dispute",
+          hashSha256: evidence.checksumSha256 || hashValue(evidence)
+        });
+      }
+      for (const proof of fulfillmentProofs) {
+        artifactHashes.push({
+          artifactType: "fulfillment_proof",
+          artifactId: String(proof.id),
+          checkpoint: "dispute",
+          hashSha256: proof.artifactChecksumSha256 || hashValue(proof)
+        });
+      }
+
+      const normalizedAssertions = Array.isArray(artifactHashAssertions)
+        ? artifactHashAssertions
+            .map((entry) => ({
+              artifactType: String(entry?.artifactType ?? "").trim(),
+              artifactId: String(entry?.artifactId ?? "").trim(),
+              expectedHashSha256: String(entry?.expectedHashSha256 ?? "")
+                .trim()
+                .toLowerCase()
+            }))
+            .filter((entry) => entry.artifactType && entry.artifactId && entry.expectedHashSha256)
+        : [];
+      for (const assertion of normalizedAssertions) {
+        const matched = artifactHashes.find(
+          (artifact) =>
+            artifact.artifactType === assertion.artifactType &&
+            artifact.artifactId === assertion.artifactId
+        );
+        if (!matched) {
+          throw new StoreError(
+            "conflict",
+            `integrity verification failed: artifact not found (${assertion.artifactType}:${assertion.artifactId})`
+          );
+        }
+        if (matched.hashSha256.toLowerCase() !== assertion.expectedHashSha256) {
+          throw new StoreError(
+            "conflict",
+            `integrity verification failed: hash mismatch (${assertion.artifactType}:${assertion.artifactId})`
+          );
+        }
+      }
+
       const payload = {
-        exportVersion:
-          Array.isArray(details.buyerRiskSignals) && details.buyerRiskSignals.length > 0 ? "v11" : "v10",
+        exportVersion: "v17",
         exportedAt: now().toISOString(),
         exportedBy: normalizedActorId,
         caseId: details.trustCase.id,
@@ -8472,7 +8663,35 @@ export function createTransactionStore({
         disputePreemptionActions: details.disputePreemptionActions,
         timeline: details.events,
         payoutTimeline: details.payoutTimeline,
-        transactionSnapshot: transaction
+        transactionSnapshot: transaction,
+        contextBundles
+      };
+      const bundleHashSha256 = hashValue({
+        exportVersion: payload.exportVersion,
+        caseId: payload.caseId,
+        transactionId: payload.transactionId,
+        policyVersionId: payload.policyVersionId,
+        contextBundles
+      });
+      const normalizedExpectedBundleHash = String(expectedBundleHashSha256 ?? "")
+        .trim()
+        .toLowerCase();
+      if (normalizedExpectedBundleHash && normalizedExpectedBundleHash !== bundleHashSha256.toLowerCase()) {
+        throw new StoreError("conflict", "integrity verification failed: bundle hash mismatch");
+      }
+      payload.integrityMetadata = {
+        verifiedAt: now().toISOString(),
+        bundleHashSha256,
+        checkpointLinkage: artifactHashes
+          .filter((artifact) => artifact.checkpoint)
+          .map((artifact) => ({
+            checkpoint: artifact.checkpoint,
+            artifactType: artifact.artifactType,
+            artifactId: artifact.artifactId,
+            hashSha256: artifact.hashSha256
+          })),
+        artifactHashes,
+        assertionsChecked: normalizedAssertions.length
       };
       appendTrustOperationsCaseEvent({
         caseId: details.trustCase.id,

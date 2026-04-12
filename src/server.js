@@ -4598,9 +4598,13 @@ export function createServer({
           const currentUser = requireAuth(req, store);
           requireRole(currentUser, "admin");
           const [caseId] = adminTrustOperationsCaseEvidenceBundleExportParams;
+          const body = await readJsonBody(req);
           const exported = store.exportTrustOpsEvidenceBundle({
             caseId: Number(caseId),
-            actorId: currentUser.id
+            actorId: currentUser.id,
+            requireDisputeArtifacts: body.requireDisputeArtifacts === true,
+            expectedBundleHashSha256: body.expectedBundleHashSha256 ?? null,
+            artifactHashAssertions: body.artifactHashAssertions
           });
           sendJson(res, 200, exported);
           return;

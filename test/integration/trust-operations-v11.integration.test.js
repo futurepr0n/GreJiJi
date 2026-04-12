@@ -217,6 +217,24 @@ test("trust operations v11: buyer-risk intelligence, preemption automation, and 
     assert.equal(preview.payload.preview.caseId, trustCase.id);
     assert.equal(typeof preview.payload.preview.alternativeInterventionPaths, "object");
 
+    const forbiddenExport = await request(
+      "POST",
+      `/admin/trust-operations/cases/${trustCase.id}/evidence-bundle/export`,
+      {},
+      buyer.token
+    );
+    assert.equal(forbiddenExport.response.status, 403);
+
+    const strictMissingArtifacts = await request(
+      "POST",
+      `/admin/trust-operations/cases/${trustCase.id}/evidence-bundle/export`,
+      {
+        requireDisputeArtifacts: true
+      },
+      admin.token
+    );
+    assert.equal(strictMissingArtifacts.response.status, 409);
+
     const exported = await request(
       "POST",
       `/admin/trust-operations/cases/${trustCase.id}/evidence-bundle/export`,
@@ -225,9 +243,25 @@ test("trust operations v11: buyer-risk intelligence, preemption automation, and 
     );
     assert.equal(exported.response.status, 200);
     assert.equal(exported.payload.caseId, trustCase.id);
-    assert.equal(exported.payload.payload.exportVersion, "v11");
+    assert.equal(exported.payload.payload.exportVersion, "v17");
     assert.ok(Array.isArray(exported.payload.payload.buyerRiskSignals));
     assert.ok(Array.isArray(exported.payload.payload.disputePreemptionActions));
+    assert.equal(typeof exported.payload.payload.contextBundles, "object");
+    assert.equal(typeof exported.payload.payload.contextBundles.assessment, "object");
+    assert.equal(typeof exported.payload.payload.contextBundles.intervention, "object");
+    assert.equal(typeof exported.payload.payload.contextBundles.dispute, "object");
+    assert.equal(typeof exported.payload.payload.integrityMetadata.bundleHashSha256, "string");
+    assert.ok(Array.isArray(exported.payload.payload.integrityMetadata.checkpointLinkage));
+
+    const strictHashMismatch = await request(
+      "POST",
+      `/admin/trust-operations/cases/${trustCase.id}/evidence-bundle/export`,
+      {
+        expectedBundleHashSha256: "deadbeef"
+      },
+      admin.token
+    );
+    assert.equal(strictHashMismatch.response.status, 409);
 
     const cleared = await request(
       "POST",

@@ -270,7 +270,7 @@ test("trust operations v10: proactive interdiction, intervention preview/export,
     );
     assert.equal(exported.response.status, 200);
     assert.equal(exported.payload.caseId, trustCase.id);
-    assert.equal(exported.payload.payload.exportVersion, "v10");
+    assert.equal(exported.payload.payload.exportVersion, "v17");
     assert.ok(Array.isArray(exported.payload.payload.remediationActions));
     assert.ok(Array.isArray(exported.payload.payload.listingAuthenticitySignals));
 
