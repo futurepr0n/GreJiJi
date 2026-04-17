@@ -45,15 +45,6 @@ if is_port_in_use "$HOST_PORT"; then
   done
 fi
 
-override_file="$(mktemp)"
-trap 'rm -f "$override_file"' EXIT
-cat > "$override_file" <<EOF
-services:
-  api:
-    ports:
-      - "${HOST_PORT}:${CONTAINER_PORT}"
-EOF
-
-docker compose -f "$COMPOSE_FILE" -f "$override_file" up -d --build
+APP_HOST_PORT="$HOST_PORT" APP_CONTAINER_PORT="$CONTAINER_PORT" docker compose -f "$COMPOSE_FILE" up -d --build
 
 echo "Docker deployment complete using $COMPOSE_FILE on host port ${HOST_PORT}"
