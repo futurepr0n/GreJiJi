@@ -39,8 +39,8 @@ async function main() {
   const repoUrl = required(args, 'repo-url');
   const credentialsId = String(args['credentials-id'] ?? '').trim();
   const branch = String(args.branch ?? '*/main');
-  const folder = String(args.folder ?? 'GreJiJi');
-  const job = String(args.job ?? 'deploy');
+  const folder = String(args.folder ?? '').trim();
+  const job = String(args.job ?? (folder ? 'deploy' : 'GreJiJi')).trim();
   const scriptPath = String(args['script-path'] ?? 'Jenkinsfile');
 
   const authHeader = `Basic ${Buffer.from(`${user}:${token}`).toString('base64')}`;
@@ -79,11 +79,12 @@ async function main() {
     return response.ok;
   }
 
-  const folderApiPath = `/job/${encodeURIComponent(folder)}/api/json`;
-  const folderExists = await exists(folderApiPath);
+  if (folder) {
+    const folderApiPath = `/job/${encodeURIComponent(folder)}/api/json`;
+    const folderExists = await exists(folderApiPath);
 
-  if (!folderExists) {
-    const folderXml = `<?xml version='1.1' encoding='UTF-8'?>
+    if (!folderExists) {
+      const folderXml = `<?xml version='1.1' encoding='UTF-8'?>
 <com.cloudbees.hudson.plugins.folder.Folder plugin="cloudbees-folder">
   <actions/>
   <description>GreJiJi deployment pipelines</description>
@@ -93,28 +94,32 @@ async function main() {
   <icon class="com.cloudbees.hudson.plugins.folder.icons.StockFolderIcon"/>
 </com.cloudbees.hudson.plugins.folder.Folder>`;
 
-    try {
-      await call(`/createItem?name=${encodeURIComponent(folder)}`, {
-        method: 'POST',
-        headers: {
-          ...crumbHeader,
-          'Content-Type': 'application/xml'
-        },
-        body: folderXml
-      });
-      console.log(`Created folder: ${folder}`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!message.includes('already exists')) {
-        throw error;
+      try {
+        await call(`/createItem?name=${encodeURIComponent(folder)}`, {
+          method: 'POST',
+          headers: {
+            ...crumbHeader,
+            'Content-Type': 'application/xml'
+          },
+          body: folderXml
+        });
+        console.log(`Created folder: ${folder}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.includes('already exists')) {
+          throw error;
+        }
+        console.log(`Folder exists: ${folder}`);
       }
+    } else {
       console.log(`Folder exists: ${folder}`);
     }
-  } else {
-    console.log(`Folder exists: ${folder}`);
   }
 
-  const jobApiPath = `/job/${encodeURIComponent(folder)}/job/${encodeURIComponent(job)}/api/json`;
+  const jobRootPath = folder
+    ? `/job/${encodeURIComponent(folder)}/job/${encodeURIComponent(job)}`
+    : `/job/${encodeURIComponent(job)}`;
+  const jobApiPath = `${jobRootPath}/api/json`;
   const jobExists = await exists(jobApiPath);
 
   const jobXml = `<?xml version='1.1' encoding='UTF-8'?>
@@ -154,7 +159,7 @@ async function main() {
 </flow-definition>`;
 
   if (jobExists) {
-    await call(`/job/${encodeURIComponent(folder)}/job/${encodeURIComponent(job)}/config.xml`, {
+    await call(`${jobRootPath}/config.xml`, {
       method: 'POST',
       headers: {
         ...crumbHeader,
@@ -162,9 +167,12 @@ async function main() {
       },
       body: jobXml
     });
-    console.log(`Updated job: ${folder}/${job}`);
+    console.log(`Updated job: ${folder ? `${folder}/${job}` : job}`);
   } else {
-    await call(`/job/${encodeURIComponent(folder)}/createItem?name=${encodeURIComponent(job)}`, {
+    const createPath = folder
+      ? `/job/${encodeURIComponent(folder)}/createItem?name=${encodeURIComponent(job)}`
+      : `/createItem?name=${encodeURIComponent(job)}`;
+    await call(createPath, {
       method: 'POST',
       headers: {
         ...crumbHeader,
@@ -172,17 +180,17 @@ async function main() {
       },
       body: jobXml
     });
-    console.log(`Created job: ${folder}/${job}`);
+    console.log(`Created job: ${folder ? `${folder}/${job}` : job}`);
   }
 
-  await call(`/job/${encodeURIComponent(folder)}/job/${encodeURIComponent(job)}/build`, {
+  await call(`${jobRootPath}/build`, {
     method: 'POST',
     headers: {
       ...crumbHeader
     }
   });
 
-  console.log(`Triggered build: ${folder}/${job}`);
+  console.log(`Triggered build: ${folder ? `${folder}/${job}` : job}`);
 }
 
 main().catch((error) => {
