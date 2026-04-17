@@ -3,6 +3,9 @@ set -euo pipefail
 
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
 ENV_FILE="${ENV_FILE:-.env}"
+HOST_PORT="${APP_HOST_PORT:-3000}"
+CONTAINER_PORT="${APP_CONTAINER_PORT:-3000}"
+ALLOW_PORT_FALLBACK="${ALLOW_PORT_FALLBACK:-1}"
 
 if [[ ! -f "$ENV_FILE" && -f .env.example ]]; then
   cp .env.example "$ENV_FILE"
@@ -13,6 +16,34 @@ if [[ ! -f "$COMPOSE_FILE" ]]; then
   exit 1
 fi
 
-docker compose -f "$COMPOSE_FILE" up -d --build
+is_port_in_use() {
+  local port="$1"
+  docker ps --format '{{.Ports}}' | grep -E -q "(^|, )0\\.0\\.0\\.0:${port}->|(^|, ):::${port}->"
+}
 
-echo "Docker deployment complete using $COMPOSE_FILE"
+if is_port_in_use "$HOST_PORT"; then
+  if [[ "$ALLOW_PORT_FALLBACK" != "1" ]]; then
+    echo "Host port ${HOST_PORT} is already in use. Set APP_HOST_PORT or enable ALLOW_PORT_FALLBACK=1." >&2
+    exit 1
+  fi
+
+  for candidate in $(seq $((HOST_PORT + 1)) $((HOST_PORT + 50))); do
+    if ! is_port_in_use "$candidate"; then
+      HOST_PORT="$candidate"
+      break
+    fi
+  done
+fi
+
+override_file="$(mktemp)"
+trap 'rm -f "$override_file"' EXIT
+cat > "$override_file" <<EOF
+services:
+  api:
+    ports:
+      - "${HOST_PORT}:${CONTAINER_PORT}"
+EOF
+
+docker compose -f "$COMPOSE_FILE" -f "$override_file" up -d --build
+
+echo "Docker deployment complete using $COMPOSE_FILE on host port ${HOST_PORT}"
