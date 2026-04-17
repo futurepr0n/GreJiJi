@@ -39,7 +39,9 @@ pipeline {
 
     stage('Deploy Docker') {
       when {
-        branch 'main'
+        expression {
+          return (env.DEPLOY_ENABLED ?: 'true') == 'true'
+        }
       }
       steps {
         sh 'chmod +x ./scripts/jenkins/deploy-docker.sh'
