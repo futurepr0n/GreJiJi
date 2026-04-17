@@ -20,6 +20,7 @@
     "deploy:production": "node scripts/deploy/run-deploy.js --env production",
     "deploy:rollback:staging": "node scripts/deploy/run-rollback.js --env staging",
     "deploy:rollback:production": "node scripts/deploy/run-rollback.js --env production",
+    "jenkins:provision": "bash ./scripts/jenkins/provision-job.sh",
     "start": "node src/server.js",
     "start:prod": "sh ./scripts/start-with-migrations.sh",
     "dev": "PORT=3000 node src/server.js",
