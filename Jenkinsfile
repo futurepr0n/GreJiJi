@@ -15,6 +15,9 @@ pipeline {
   environment {
     APP_NAME = 'grejiji-api'
     IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT?.take(7) ?: 'local'}"
+    APP_HOST_PORT = "${env.APP_HOST_PORT ?: '3333'}"
+    APP_CONTAINER_PORT = "${env.APP_CONTAINER_PORT ?: '3000'}"
+    APP_SERVICE_NAME = "${env.APP_SERVICE_NAME ?: 'api'}"
   }
 
   stages {
