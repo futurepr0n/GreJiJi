@@ -162,7 +162,8 @@ verify_port_binding() {
 }
 
 verify_health() {
-  local target_url="${HEALTHCHECK_SCHEME}://${HEALTHCHECK_HOST}:${HOST_PORT}${HEALTHCHECK_PATH}"
+  local healthcheck_path="${1:-$HEALTHCHECK_PATH}"
+  local target_url="${HEALTHCHECK_SCHEME}://${HEALTHCHECK_HOST}:${HOST_PORT}${healthcheck_path}"
   local deadline=$((SECONDS + HEALTHCHECK_TIMEOUT_SECONDS))
 
   while ((SECONDS <= deadline)); do
@@ -181,6 +182,7 @@ verify_health() {
 rollback_to_previous() {
   local rollback_tag="$1"
   local rollback_ref="$2"
+  local rollback_healthcheck_path="${ROLLBACK_HEALTHCHECK_PATH:-/health}"
 
   [[ -n "$rollback_tag" && -n "$rollback_ref" ]] || fail "Rollback requested but no previous image reference is available."
 
@@ -192,7 +194,7 @@ rollback_to_previous() {
   rollback_container_id="$(run_compose ps -q "$APP_SERVICE_NAME")"
   [[ -n "$rollback_container_id" ]] || fail "Rollback failed: service container is not running."
   verify_port_binding "$rollback_container_id"
-  verify_health || fail "Rollback completed but service failed health checks."
+  verify_health "$rollback_healthcheck_path" || fail "Rollback completed but service failed health checks."
   log "Rollback succeeded and service is healthy."
 }
 
