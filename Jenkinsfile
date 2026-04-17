@@ -1,6 +1,7 @@
 pipeline {
   agent {
     node {
+      label 'dev-docker-ssh'
       customWorkspace '/home/jenkins/workspace/grejiji-pipeline'
     }
   }
