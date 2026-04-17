@@ -18,6 +18,8 @@ pipeline {
     APP_HOST_PORT = "${env.APP_HOST_PORT ?: '3333'}"
     APP_CONTAINER_PORT = "${env.APP_CONTAINER_PORT ?: '3000'}"
     APP_SERVICE_NAME = "${env.APP_SERVICE_NAME ?: 'api'}"
+    ALLOW_PORT_FALLBACK = "${env.ALLOW_PORT_FALLBACK ?: '1'}"
+    ROLLBACK_SIMULATION_ENABLED = "${env.ROLLBACK_SIMULATION_ENABLED ?: 'true'}"
   }
 
   stages {
@@ -55,6 +57,33 @@ pipeline {
       steps {
         sh 'chmod +x ./scripts/jenkins/deploy-docker.sh'
         sh './scripts/jenkins/deploy-docker.sh'
+      }
+    }
+
+    stage('Rollback Simulation Gate') {
+      when {
+        expression {
+          return (env.DEPLOY_ENABLED ?: 'true') == 'true' &&
+            (env.ROLLBACK_SIMULATION_ENABLED ?: 'true') == 'true'
+        }
+      }
+      steps {
+        sh '''
+          set +e
+          HEALTHCHECK_PATH="/__force_rollback_probe__" ./scripts/jenkins/deploy-docker.sh > rollback-simulation.log 2>&1
+          status=$?
+          set -e
+
+          cat rollback-simulation.log
+
+          if [ "$status" -eq 0 ]; then
+            echo "Rollback simulation expected failure, but deploy script succeeded."
+            exit 1
+          fi
+
+          grep -q "Attempting rollback to previous image" rollback-simulation.log
+          grep -q "Rollback succeeded and service is healthy." rollback-simulation.log
+        '''
       }
     }
   }
