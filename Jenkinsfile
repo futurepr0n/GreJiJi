@@ -19,15 +19,15 @@ pipeline {
       }
     }
 
-    stage('Install') {
-      steps {
-        sh 'npm ci'
-      }
-    }
-
     stage('Test Gate') {
       steps {
-        sh 'npm test'
+        sh '''
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            node:20-bookworm-slim \
+            sh -lc "npm ci && npm test"
+        '''
       }
     }
 
