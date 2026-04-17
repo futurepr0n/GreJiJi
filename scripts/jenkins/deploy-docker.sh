@@ -3,9 +3,9 @@ set -euo pipefail
 
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
 ENV_FILE="${ENV_FILE:-.env}"
-HOST_PORT="${APP_HOST_PORT:-3010}"
+HOST_PORT="${APP_HOST_PORT:-3333}"
 CONTAINER_PORT="${APP_CONTAINER_PORT:-3000}"
-ALLOW_PORT_FALLBACK="${ALLOW_PORT_FALLBACK:-1}"
+ALLOW_PORT_FALLBACK="${ALLOW_PORT_FALLBACK:-0}"
 
 if [[ ! -f "$ENV_FILE" && -f .env.example ]]; then
   cp .env.example "$ENV_FILE"
