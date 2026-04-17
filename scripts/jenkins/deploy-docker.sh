@@ -75,6 +75,21 @@ run_compose() {
     "$DOCKER_BIN" compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
+image_repo_without_tag() {
+  local image_ref="$1"
+  local without_digest="${image_ref%@*}"
+  local last_segment="${without_digest##*/}"
+
+  # Strip only the final tag separator from the image name segment.
+  # This preserves registry host:port prefixes such as registry:5000/repo.
+  if [[ "$last_segment" == *:* ]]; then
+    printf '%s\n' "${without_digest%:*}"
+    return
+  fi
+
+  printf '%s\n' "$without_digest"
+}
+
 if [[ ! -f "$ENV_FILE" && -f .env.example ]]; then
   cp .env.example "$ENV_FILE"
 fi
@@ -202,7 +217,7 @@ previous_container_id="$(run_compose ps -q "$APP_SERVICE_NAME")"
 if [[ -n "$previous_container_id" ]]; then
   rollback_ref="$("$DOCKER_BIN" inspect --format '{{.Config.Image}}' "$previous_container_id" 2>/dev/null || true)"
   if [[ -n "$rollback_ref" ]]; then
-    rollback_tag="${APP_IMAGE_REF}:rollback-${BUILD_NUMBER:-$(date +%s)}"
+    rollback_tag="$(image_repo_without_tag "$APP_IMAGE_REF"):rollback-${BUILD_NUMBER:-$(date +%s)}"
     "$DOCKER_BIN" tag "$rollback_ref" "$rollback_tag"
     log "Captured rollback image ${rollback_ref} as ${rollback_tag}."
   fi
