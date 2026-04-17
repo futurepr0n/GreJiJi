@@ -1,5 +1,9 @@
 pipeline {
-  agent any
+  agent {
+    node {
+      customWorkspace '/home/jenkins/workspace/grejiji-pipeline'
+    }
+  }
 
   options {
     disableConcurrentBuilds()
@@ -23,6 +27,7 @@ pipeline {
       steps {
         sh '''
           docker run --rm \
+            --user "$(id -u):$(id -g)" \
             -v "$PWD:/workspace" \
             -w /workspace \
             node:20-bookworm-slim \
