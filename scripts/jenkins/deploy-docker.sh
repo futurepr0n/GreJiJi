@@ -32,6 +32,10 @@ require_command() {
   command -v "$command_name" >/dev/null 2>&1 || fail "Missing required command: $command_name"
 }
 
+contains_unresolved_var() {
+  [[ "$1" == *'$'* ]]
+}
+
 is_positive_port() {
   local value="$1"
   [[ "$value" =~ ^[0-9]+$ ]] && ((value >= 1 && value <= 65535))
@@ -68,6 +72,38 @@ is_placeholder_secret() {
   local value
   value="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
   [[ -z "$value" || "$value" == "change-me" || "$value" == "your-secret" ]]
+}
+
+is_valid_health_scheme() {
+  [[ "$1" =~ ^https?$ ]]
+}
+
+is_valid_health_path() {
+  local value="$1"
+  [[ -n "$value" && "$value" =~ ^/[^[:space:]]*$ ]]
+}
+
+is_valid_health_host() {
+  local value="$1"
+  [[ "$value" =~ ^[a-zA-Z0-9.-]+$ || "$value" =~ ^\[[0-9a-fA-F:]+\]$ ]]
+}
+
+validate_health_target() {
+  local label="$1"
+  local path="$2"
+  local scheme="$3"
+  local host="$4"
+
+  contains_unresolved_var "$path" && fail "${label} contains unresolved shell variable tokens."
+  contains_unresolved_var "$scheme" && fail "${label} contains unresolved shell variable tokens."
+  contains_unresolved_var "$host" && fail "${label} contains unresolved shell variable tokens."
+
+  is_valid_health_path "$path" || fail "${label} path must start with '/' and contain no spaces."
+  is_valid_health_scheme "$scheme" || fail "${label} scheme must be http or https."
+  is_valid_health_host "$host" || fail "${label} host is malformed."
+
+  local target_url="${scheme}://${host}:${HOST_PORT}${path}"
+  [[ "$target_url" =~ ^https?://[^/]+/.+$ ]] || fail "${label} produced an invalid target URL."
 }
 
 run_compose() {
@@ -150,6 +186,13 @@ validate_context() {
     is_placeholder_secret "$stripe_webhook_secret" && fail "STRIPE_WEBHOOK_SECRET is required when PAYMENT_PROVIDER=stripe."
   fi
 
+  local rollback_healthcheck_path="/health"
+  if [[ "${ROLLBACK_HEALTHCHECK_PATH+x}" == "x" ]]; then
+    rollback_healthcheck_path="$ROLLBACK_HEALTHCHECK_PATH"
+  fi
+  validate_health_target "HEALTHCHECK_PATH" "$HEALTHCHECK_PATH" "$HEALTHCHECK_SCHEME" "$HEALTHCHECK_HOST"
+  validate_health_target "ROLLBACK_HEALTHCHECK_PATH" "$rollback_healthcheck_path" "$HEALTHCHECK_SCHEME" "$HEALTHCHECK_HOST"
+
   run_compose config >/dev/null
 }
 
@@ -165,24 +208,34 @@ verify_health() {
   local healthcheck_path="${1:-$HEALTHCHECK_PATH}"
   local target_url="${HEALTHCHECK_SCHEME}://${HEALTHCHECK_HOST}:${HOST_PORT}${healthcheck_path}"
   local deadline=$((SECONDS + HEALTHCHECK_TIMEOUT_SECONDS))
+  local attempt=0
+  local last_status="curl-error"
+  local last_body=""
 
   while ((SECONDS <= deadline)); do
+    attempt=$((attempt + 1))
     status="$("$CURL_BIN" -sS -o /tmp/grejiji-healthcheck.out -w '%{http_code}' "$target_url" || true)"
+    last_status="$status"
+    if [[ -f /tmp/grejiji-healthcheck.out ]]; then
+      last_body="$(tr '\n' ' ' </tmp/grejiji-healthcheck.out | tr -s ' ' | cut -c1-180)"
+    fi
     if [[ "$status" == "200" ]]; then
       return 0
     fi
     sleep "$HEALTHCHECK_INTERVAL_SECONDS"
   done
 
-  log "Healthcheck response body:"
-  cat /tmp/grejiji-healthcheck.out 2>/dev/null || true
+  log "Healthcheck failure summary: url='${target_url}' path='${healthcheck_path}' attempts='${attempt}' last_status='${last_status}' body_excerpt='${last_body}'"
   return 1
 }
 
 rollback_to_previous() {
   local rollback_tag="$1"
   local rollback_ref="$2"
-  local rollback_healthcheck_path="${ROLLBACK_HEALTHCHECK_PATH:-/health}"
+  local rollback_healthcheck_path="/health"
+  if [[ "${ROLLBACK_HEALTHCHECK_PATH+x}" == "x" ]]; then
+    rollback_healthcheck_path="$ROLLBACK_HEALTHCHECK_PATH"
+  fi
 
   [[ -n "$rollback_tag" && -n "$rollback_ref" ]] || fail "Rollback requested but no previous image reference is available."
 
