@@ -38,6 +38,13 @@ pipeline {
       }
     }
 
+    stage('Deploy Secrets Preflight') {
+      steps {
+        sh 'chmod +x ./scripts/jenkins/preflight-deploy-secrets.sh'
+        sh './scripts/jenkins/preflight-deploy-secrets.sh'
+      }
+    }
+
     stage('Test Gate') {
       steps {
         sh '''
