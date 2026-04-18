@@ -152,6 +152,31 @@ function renderRoleUI() {
   logoutButton.hidden = !role;
 }
 
+function collectListingPhotoSources(listing) {
+  const linkedPhotos = Array.isArray(listing?.photoUrls) ? listing.photoUrls : [];
+  const uploadedPhotos = Array.isArray(listing?.uploadedPhotos) ? listing.uploadedPhotos : [];
+  const combined = [
+    ...linkedPhotos.map((url) => ({ url, source: "link" })),
+    ...uploadedPhotos.map((photo) => ({
+      url: photo.downloadUrl,
+      source: `upload: ${photo.originalFileName || "photo"}`
+    }))
+  ]
+    .filter((item) => typeof item.url === "string" && item.url.trim())
+    .map((item) => ({ ...item, url: item.url.trim() }));
+
+  const deduped = [];
+  const seen = new Set();
+  for (const item of combined) {
+    if (seen.has(item.url)) {
+      continue;
+    }
+    seen.add(item.url);
+    deduped.push(item);
+  }
+  return deduped;
+}
+
 function renderListingDetail() {
   const detailNode = qs("#listing-detail");
   const listing = state.selectedListing;
@@ -160,24 +185,29 @@ function renderListingDetail() {
     return;
   }
 
-  const linkedPhotos = Array.isArray(listing.photoUrls) ? listing.photoUrls : [];
-  const uploadedPhotos = Array.isArray(listing.uploadedPhotos) ? listing.uploadedPhotos : [];
+  const photoSources = collectListingPhotoSources(listing);
+  const galleryHtml =
+    photoSources.length === 0
+      ? `<p class="status">No photos attached.</p>`
+      : `<div class="listing-gallery">
+          ${photoSources
+            .map(
+              (photo, index) => `
+                <a class="listing-photo-frame" href="${escapeHtml(photo.url)}" target="_blank" rel="noreferrer">
+                  <img src="${escapeHtml(photo.url)}" alt="${escapeHtml(`${listing.title} photo ${index + 1}`)}" loading="lazy" referrerpolicy="no-referrer" />
+                  <span class="listing-photo-caption">${escapeHtml(photo.source)}</span>
+                </a>
+              `
+            )
+            .join("")}
+        </div>`;
   const linkedPhotoHtml =
-    linkedPhotos.length === 0
+    photoSources.length === 0
       ? "<li>None</li>"
-      : linkedPhotos
-          .map(
-            (url) =>
-              `<li><a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(url)}</a></li>`
-          )
-          .join("");
-  const uploadedPhotoHtml =
-    uploadedPhotos.length === 0
-      ? "<li>None</li>"
-      : uploadedPhotos
+      : photoSources
           .map(
             (photo) =>
-              `<li><a href="${escapeHtml(photo.downloadUrl)}" target="_blank" rel="noreferrer">${escapeHtml(photo.originalFileName)}</a> (${escapeHtml(photo.mimeType)})</li>`
+              `<li><a href="${escapeHtml(photo.url)}" target="_blank" rel="noreferrer">${escapeHtml(photo.url)}</a></li>`
           )
           .join("");
 
@@ -186,10 +216,10 @@ function renderListingDetail() {
     <p>${escapeHtml(listing.description || "No description")}</p>
     <p>Seller: <code>${escapeHtml(listing.sellerId)}</code></p>
     <p>Price: <strong>${toUsdLike(listing.priceCents, "USD")}</strong></p>
+    <p>Photos:</p>
+    ${galleryHtml}
     <p>Photo links:</p>
     <ul>${linkedPhotoHtml}</ul>
-    <p>Uploaded photos:</p>
-    <ul>${uploadedPhotoHtml}</ul>
     <p>Updated: ${escapeHtml(fmtDate(listing.updatedAt))}</p>
   `;
 
@@ -231,8 +261,25 @@ function renderListings() {
 
   for (const listing of state.listings) {
     const item = document.createElement("li");
-    const text = document.createElement("span");
-    text.textContent = `${listing.title} - ${toUsdLike(listing.priceCents, "USD")}`;
+    item.className = "listing-row";
+    const text = document.createElement("div");
+    text.className = "listing-row-main";
+    const title = document.createElement("strong");
+    title.textContent = listing.title;
+    const meta = document.createElement("span");
+    meta.className = "listing-row-meta";
+    meta.textContent = `${toUsdLike(listing.priceCents, "USD")} • ${listing.localArea || "Local pickup"}`;
+    text.append(title, meta);
+    const thumbnailUrl = collectListingPhotoSources(listing)[0]?.url ?? null;
+    if (thumbnailUrl) {
+      const thumb = document.createElement("img");
+      thumb.className = "listing-thumb";
+      thumb.src = thumbnailUrl;
+      thumb.alt = `${listing.title} thumbnail`;
+      thumb.loading = "lazy";
+      thumb.referrerPolicy = "no-referrer";
+      item.appendChild(thumb);
+    }
     const button = document.createElement("button");
     button.type = "button";
     button.textContent = "Select";

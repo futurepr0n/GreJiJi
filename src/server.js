@@ -833,7 +833,115 @@ function hashPassword(password, salt) {
 }
 
 function buildDemoCatalog() {
-  const sellers = Array.from({ length: 10 }, (_, index) => {
+  const retroDemoItems = [
+    {
+      title: "Chrono Trigger (SNES) CIB",
+      description:
+        "Authentic North American cart with original box and manual. Battery save confirmed.",
+      priceCents: 32900,
+      localArea: "Toronto",
+      photoUrls: [
+        "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Super_Nintendo_Entertainment_System/master/Named_Boxarts/Chrono%20Trigger%20(USA).png",
+        "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Super_Nintendo_Entertainment_System/master/Named_Snaps/Chrono%20Trigger%20(USA).png"
+      ]
+    },
+    {
+      title: "Donkey Kong Country (SNES)",
+      description: "Clean label and tested on hardware. Great starter platformer for SNES collectors.",
+      priceCents: 5900,
+      localArea: "Vancouver",
+      photoUrls: [
+        "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Super_Nintendo_Entertainment_System/master/Named_Boxarts/Donkey%20Kong%20Country%20(USA).png",
+        "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Super_Nintendo_Entertainment_System/master/Named_Snaps/Donkey%20Kong%20Country%20(USA).png"
+      ]
+    },
+    {
+      title: "F-Zero (SNES)",
+      description: "Original cart in very good condition. Works perfectly and includes protective sleeve.",
+      priceCents: 4600,
+      localArea: "Calgary",
+      photoUrls: [
+        "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Super_Nintendo_Entertainment_System/master/Named_Boxarts/F-Zero%20(USA).png",
+        "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Super_Nintendo_Entertainment_System/master/Named_Snaps/F-Zero%20(USA).png"
+      ]
+    },
+    {
+      title: "EarthBound (SNES) Cart",
+      description:
+        "Collector-grade label and shell. Save battery and pins cleaned before listing.",
+      priceCents: 39800,
+      localArea: "Montreal",
+      photoUrls: [
+        "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Super_Nintendo_Entertainment_System/master/Named_Boxarts/EarthBound%20(USA).png",
+        "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Super_Nintendo_Entertainment_System/master/Named_Snaps/EarthBound%20(USA).png"
+      ]
+    },
+    {
+      title: "Final Fantasy III (SNES)",
+      description: "Classic RPG release with crisp label and tested SRAM saves.",
+      priceCents: 9400,
+      localArea: "Ottawa",
+      photoUrls: [
+        "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Super_Nintendo_Entertainment_System/master/Named_Boxarts/Final%20Fantasy%20III%20(USA).png",
+        "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Super_Nintendo_Entertainment_System/master/Named_Snaps/Final%20Fantasy%20III%20(USA).png"
+      ]
+    },
+    {
+      title: "Pokemon Blue Version (Game Boy)",
+      description: "Original release cartridge. Save file present and battery currently holding.",
+      priceCents: 8400,
+      localArea: "Toronto",
+      photoUrls: [
+        "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Game_Boy/master/Named_Boxarts/Pokemon%20-%20Blue%20Version%20(USA%2C%20Europe)%20(SGB%20Enhanced).png",
+        "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Game_Boy/master/Named_Snaps/Pokemon%20-%20Blue%20Version%20(USA%2C%20Europe)%20(SGB%20Enhanced).png"
+      ]
+    },
+    {
+      title: "Tetris (Game Boy)",
+      description:
+        "Reliable puzzle staple for original DMG hardware. Label has minor wear, game fully tested.",
+      priceCents: 2300,
+      localArea: "Quebec City",
+      photoUrls: [
+        "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Game_Boy/master/Named_Boxarts/Tetris%20(World)%20(Rev%201).png",
+        "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Game_Boy/master/Named_Snaps/Tetris%20(World)%20(Rev%201).png"
+      ]
+    },
+    {
+      title: "Kirby's Dream Land (Game Boy)",
+      description: "Original cart with clean contacts. Great condition for a first-party handheld classic.",
+      priceCents: 4100,
+      localArea: "Edmonton",
+      photoUrls: [
+        "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Game_Boy/master/Named_Boxarts/Kirby's%20Dream%20Land%20(USA%2C%20Europe).png",
+        "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Game_Boy/master/Named_Snaps/Kirby's%20Dream%20Land%20(USA%2C%20Europe).png"
+      ]
+    },
+    {
+      title: "Golden Axe (Genesis)",
+      description:
+        "Sega Genesis cart and case set. Tested on Model 1 console and includes original insert.",
+      priceCents: 5200,
+      localArea: "Halifax",
+      photoUrls: [
+        "https://raw.githubusercontent.com/libretro-thumbnails/Sega_-_Mega_Drive_-_Genesis/master/Named_Boxarts/Golden%20Axe%20(World).png",
+        "https://raw.githubusercontent.com/libretro-thumbnails/Sega_-_Mega_Drive_-_Genesis/master/Named_Snaps/Golden%20Axe%20(World).png"
+      ]
+    },
+    {
+      title: "Super Mario 64 (Nintendo 64)",
+      description:
+        "North American cart with clear front label and clean back sticker. Boots first try.",
+      priceCents: 7700,
+      localArea: "Winnipeg",
+      photoUrls: [
+        "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Nintendo_64/master/Named_Boxarts/Super%20Mario%2064%20(USA).png",
+        "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Nintendo_64/master/Named_Snaps/Super%20Mario%2064%20(USA).png"
+      ]
+    }
+  ];
+
+  const sellers = retroDemoItems.map((listing, index) => {
     const ordinal = String(index + 1).padStart(2, "0");
     return {
       id: `demo-seller-${ordinal}`,
@@ -841,13 +949,7 @@ function buildDemoCatalog() {
       role: "seller",
       listing: {
         id: `demo-listing-${ordinal}`,
-        title: `Demo Listing ${ordinal}: Local Item`,
-        description: `Seller ${ordinal} sample inventory for marketplace demo mode.`,
-        priceCents: 2500 + index * 950,
-        localArea: ["Toronto", "Montreal", "Vancouver", "Calgary", "Ottawa"][index % 5],
-        photoUrls: [
-          `https://images.unsplash.com/photo-1556745757-${1000 + index}?auto=format&fit=crop&w=900&q=80`
-        ]
+        ...listing
       }
     };
   });
@@ -885,6 +987,7 @@ function ensureDemoMarketplaceData(store, { enabled = true } = {}) {
     enabled: true,
     createdUsers: 0,
     createdListings: 0,
+    updatedListings: 0,
     createdTransactions: 0,
     createdRatings: 0
   };
@@ -934,6 +1037,23 @@ function ensureDemoMarketplaceData(store, { enabled = true } = {}) {
         moderationUpdatedBy: catalog.admin.id
       });
       summary.createdListings += 1;
+    } else {
+      store.updateListing({
+        id: seller.listing.id,
+        sellerId: ensuredSeller.id,
+        title: seller.listing.title,
+        description: seller.listing.description,
+        priceCents: seller.listing.priceCents,
+        localArea: seller.listing.localArea,
+        photoUrls: seller.listing.photoUrls,
+        moderationStatus: "approved",
+        moderationReasonCode: null,
+        moderationPublicReason: null,
+        moderationInternalNotes: "Updated by demo seed catalog refresh.",
+        moderationUpdatedBy: catalog.admin.id,
+        moderationSource: "system_seed"
+      });
+      summary.updatedListings += 1;
     }
 
     const transactionId = `demo-history-txn-${String(index + 1).padStart(2, "0")}`;

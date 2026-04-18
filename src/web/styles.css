@@ -238,6 +238,58 @@ button.ghost {
   font-size: 0.85rem;
 }
 
+.listing-row {
+  gap: 12px;
+}
+
+.listing-row-main {
+  display: grid;
+  gap: 2px;
+}
+
+.listing-row-meta {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.listing-thumb {
+  width: 74px;
+  height: 74px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #f7f7f7;
+  flex-shrink: 0;
+}
+
+.listing-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+  margin: 8px 0 12px;
+}
+
+.listing-photo-frame {
+  display: grid;
+  gap: 6px;
+  text-decoration: none;
+  color: inherit;
+}
+
+.listing-photo-frame img {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #f7f7f7;
+}
+
+.listing-photo-caption {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
 .stack-list {
   margin: 8px 0 0;
   padding-left: 18px;
