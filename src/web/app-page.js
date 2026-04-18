@@ -12,18 +12,60 @@ export function renderWebAppPage() {
     <div class="bg-orb bg-orb-b" aria-hidden="true"></div>
     <main class="shell">
       <header class="hero">
-        <p class="eyebrow">GreJiJi Web</p>
-        <h1>Marketplace operations console</h1>
+        <div class="hero-top-row">
+          <div>
+            <p class="eyebrow">GreJiJi Web</p>
+            <h1>Marketplace operations console</h1>
+          </div>
+          <div class="hero-actions">
+            <p class="status auth-pill" id="auth-status">Sign in to unlock role-aware controls.</p>
+            <button type="button" id="open-auth-modal">Sign in / Register</button>
+            <button type="button" class="ghost" id="logout-button" hidden>Logout</button>
+          </div>
+        </div>
         <p class="lede">
           Run buyer/seller lifecycle checks and admin moderation, dispute, and risk interventions against the live API.
         </p>
       </header>
 
-      <section class="panel" id="auth-panel">
-        <h2>Authentication</h2>
-        <p class="status" id="auth-status">Sign in to unlock role-aware controls.</p>
+      <section class="panel" id="demo-access-panel">
+        <h2>Demo Access</h2>
+        <p class="status">Use one-click credentials to enter seller, buyer, or admin views.</p>
+        <div class="actions">
+          <button
+            type="button"
+            class="ghost demo-login"
+            data-email="demo-seller-01@grejiji.demo"
+            data-password="DemoMarket123!"
+          >
+            Login as Seller
+          </button>
+          <button
+            type="button"
+            class="ghost demo-login"
+            data-email="demo-buyer@grejiji.demo"
+            data-password="DemoMarket123!"
+          >
+            Login as Buyer
+          </button>
+          <button
+            type="button"
+            class="ghost demo-login"
+            data-email="demo-admin@grejiji.demo"
+            data-password="DemoMarket123!"
+          >
+            Login as Admin
+          </button>
+        </div>
+      </section>
 
-        <div class="grid two">
+      <dialog id="auth-modal" class="auth-modal">
+        <div class="auth-modal-header">
+          <h2>Account Access</h2>
+          <button type="button" class="ghost" id="close-auth-modal">Close</button>
+        </div>
+        <p class="status">Sign in to an existing account or register a new one.</p>
+        <div class="grid two auth-grid">
           <form id="register-form" class="card">
             <h3>Create account</h3>
             <label>User ID <input name="userId" placeholder="optional-user-id" /></label>
@@ -44,10 +86,9 @@ export function renderWebAppPage() {
             <label>Email <input required name="email" type="email" /></label>
             <label>Password <input required name="password" type="password" /></label>
             <button type="submit">Login</button>
-            <button type="button" class="ghost" id="logout-button">Logout</button>
           </form>
         </div>
-      </section>
+      </dialog>
 
       <section class="panel" id="listings-panel">
         <h2>Listings Marketplace</h2>
@@ -71,7 +112,7 @@ export function renderWebAppPage() {
           <label>Listing ID <input name="listingId" placeholder="optional-listing-id" /></label>
           <label>Title <input required name="title" /></label>
           <label>Description <textarea name="description" rows="3"></textarea></label>
-          <label>Price (cents) <input required name="priceCents" type="number" min="1" step="1" /></label>
+          <label>Price (USD) <input required name="priceDollars" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="49.99" /></label>
           <label>Local area <input required name="localArea" /></label>
           <label>Photo URLs (one per line) <textarea name="photoUrls" rows="3" placeholder="https://example.com/photo-1.jpg"></textarea></label>
           <button type="submit">Create listing</button>
@@ -93,7 +134,7 @@ export function renderWebAppPage() {
             <h3>Buyer: purchase selected listing</h3>
             <label>Transaction ID <input name="transactionId" placeholder="optional-transaction-id" /></label>
             <label>Seller ID <input name="sellerId" required /></label>
-            <label>Amount cents <input name="amountCents" required type="number" min="1" step="1" /></label>
+            <label>Offer amount (USD) <input name="amountDollars" required type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="49.99" /></label>
             <button type="submit">Create transaction</button>
           </form>
 
@@ -260,51 +301,56 @@ export function renderWebAppPage() {
             <h3>Transaction risk detail</h3>
             <label>Transaction ID <input required name="transactionId" /></label>
             <button type="submit">Load risk detail</button>
-            <div id="admin-risk-transaction-detail">Load a transaction to view risk profile and action history.</div>
           </form>
-          <form id="admin-risk-action-form" class="card">
-            <h3>Transaction intervention</h3>
-            <label>Action
-              <select name="action" required>
-                <option value="hold">hold</option>
-                <option value="unhold">unhold</option>
-              </select>
-            </label>
-            <label>Reason <input required name="reason" placeholder="manual review reason" /></label>
-            <label>Notes <textarea name="notes" rows="3" placeholder="Operator context for audit trail"></textarea></label>
-            <button type="submit">Apply intervention</button>
+          <div class="card">
+            <h3>Selected transaction risk</h3>
+            <div id="admin-risk-transaction-detail">Load a transaction to inspect risk profile.</div>
+            <form id="admin-risk-action-form" class="stack">
+              <label>Action
+                <select name="action" required>
+                  <option value="hold">hold</option>
+                  <option value="unhold">unhold</option>
+                </select>
+              </label>
+              <label>Reason <input required name="reason" placeholder="risk_escalation" /></label>
+              <label>Notes <textarea name="notes" rows="3" placeholder="Optional internal notes"></textarea></label>
+              <button type="submit">Apply transaction intervention</button>
+            </form>
             <p class="status" id="admin-risk-status-line"></p>
-          </form>
+          </div>
         </div>
+
         <div class="grid two">
           <form id="admin-risk-account-form" class="card">
-            <h3>Account risk + verification</h3>
+            <h3>Account risk detail</h3>
             <label>User ID <input required name="userId" /></label>
-            <button type="submit">Load account risk detail</button>
-            <div id="admin-risk-account-detail">Load an account to review tier, verification state, and recent limit decisions.</div>
+            <button type="submit">Load account detail</button>
           </form>
-          <form id="admin-risk-account-action-form" class="card">
-            <h3>Account controls</h3>
-            <label>Action
-              <select name="action" required>
-                <option value="approve-verification">approve-verification</option>
-                <option value="reject-verification">reject-verification</option>
-                <option value="override-tier">override-tier</option>
-                <option value="clear-tier-override">clear-tier-override</option>
-              </select>
-            </label>
-            <label>Tier (override only)
-              <select name="tier">
-                <option value="low">low</option>
-                <option value="medium">medium</option>
-                <option value="high">high</option>
-              </select>
-            </label>
-            <label>Reason <input required name="reason" placeholder="operator reason" /></label>
-            <label>Notes <textarea name="notes" rows="3" placeholder="optional operator notes"></textarea></label>
-            <button type="submit">Apply account control</button>
+          <div class="card">
+            <h3>Selected account risk</h3>
+            <div id="admin-risk-account-detail">Load an account to inspect verification and risk posture.</div>
+            <form id="admin-risk-account-action-form" class="stack">
+              <label>Action
+                <select name="action" required>
+                  <option value="approve-verification">approve-verification</option>
+                  <option value="reject-verification">reject-verification</option>
+                  <option value="override-tier">override-tier</option>
+                  <option value="clear-tier-override">clear-tier-override</option>
+                </select>
+              </label>
+              <label>Tier
+                <select name="tier">
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                </select>
+              </label>
+              <label>Reason <input required name="reason" placeholder="manual_review_outcome" /></label>
+              <label>Notes <textarea name="notes" rows="3"></textarea></label>
+              <button type="submit">Apply account intervention</button>
+            </form>
             <p class="status" id="admin-risk-account-status-line"></p>
-          </form>
+          </div>
         </div>
       </section>
 
@@ -312,58 +358,55 @@ export function renderWebAppPage() {
         <h2>Launch Control</h2>
         <div class="actions">
           <button type="button" id="load-launch-control-flags">Load flags</button>
-          <button type="button" id="load-launch-control-audit">Load audit</button>
-          <button type="button" id="load-launch-control-incidents">Load incidents</button>
+          <button type="button" class="ghost" id="load-launch-control-audit">Load audit</button>
+          <button type="button" class="ghost" id="load-launch-control-incidents">Load incidents</button>
         </div>
         <div class="grid two">
           <div class="card">
-            <h3>Flags</h3>
-            <ul id="launch-control-flag-list" class="list"></ul>
-          </div>
-          <form id="launch-control-flag-form" class="card stack">
-            <h3>Flag update</h3>
-            <label>Flag key
-              <select name="key" required>
-                <option value="transaction_initiation">transaction_initiation</option>
-                <option value="payout_release">payout_release</option>
-                <option value="dispute_auto_transitions">dispute_auto_transitions</option>
-                <option value="moderation_auto_actions">moderation_auto_actions</option>
-              </select>
-            </label>
-            <label>Enabled
-              <select name="enabled" required>
-                <option value="true">true</option>
-                <option value="false">false</option>
-              </select>
-            </label>
-            <label>Rollout % <input name="rolloutPercentage" type="number" min="0" max="100" value="100" /></label>
-            <label>Allowlist users (comma-separated) <input name="allowlistUserIds" placeholder="user-a,user-b" /></label>
-            <label>Region allowlist (comma-separated) <input name="regionAllowlist" placeholder="CA-ON,US-NY" /></label>
-            <label>Reason <input name="reason" required placeholder="why this change is needed" /></label>
-            <label>Deployment run id <input name="deploymentRunId" placeholder="optional deployment run id" /></label>
-            <button type="submit">Apply launch flag update</button>
-            <p class="status" id="launch-control-status-line"></p>
-          </form>
-        </div>
-        <div class="grid two">
-          <div class="card">
-            <h3>Audit events</h3>
-            <pre id="launch-control-audit-log" class="log"></pre>
+            <h3>Flag controls</h3>
+            <form id="launch-control-flag-form" class="stack">
+              <label>Flag key
+                <select name="key" required>
+                  <option value="transaction_initiation">transaction_initiation</option>
+                  <option value="payout_release">payout_release</option>
+                  <option value="dispute_auto_transitions">dispute_auto_transitions</option>
+                  <option value="moderation_auto_actions">moderation_auto_actions</option>
+                </select>
+              </label>
+              <label>Enabled
+                <select name="enabled" required>
+                  <option value="true">true</option>
+                  <option value="false">false</option>
+                </select>
+              </label>
+              <label>Rollout percentage <input name="rolloutPercentage" type="number" min="0" max="100" step="1" placeholder="100" /></label>
+              <label>Allowlist user IDs (comma separated) <input name="allowlistUserIds" /></label>
+              <label>Region allowlist (comma separated) <input name="regionAllowlist" /></label>
+              <label>Reason <input name="reason" required /></label>
+              <label>Deployment run ID <input name="deploymentRunId" /></label>
+              <button type="submit">Apply flag update</button>
+            </form>
           </div>
           <div class="card">
-            <h3>Incidents</h3>
-            <pre id="launch-control-incident-log" class="log"></pre>
+            <h3>Auto rollback</h3>
             <form id="launch-control-rollback-form" class="stack">
-              <label>Incident key <input name="incidentKey" placeholder="optional stable incident key" /></label>
-              <label>Reason <input name="reason" placeholder="optional operator context" /></label>
+              <label>Incident key <input name="incidentKey" placeholder="optional-incident-key" /></label>
+              <label>Reason <input name="reason" placeholder="optional reason" /></label>
               <label>Force rollback
                 <select name="force">
                   <option value="false">false</option>
                   <option value="true">true</option>
                 </select>
               </label>
-              <button type="submit">Run auto-rollback hook</button>
+              <button type="submit">Run auto rollback check</button>
             </form>
+            <p class="status" id="launch-control-status-line"></p>
+            <h4>Flags</h4>
+            <ul id="launch-control-flag-list" class="list"></ul>
+            <h4>Audit events</h4>
+            <pre id="launch-control-audit-log" class="log"></pre>
+            <h4>Incidents</h4>
+            <pre id="launch-control-incident-log" class="log"></pre>
           </div>
         </div>
       </section>
@@ -378,7 +421,7 @@ export function renderWebAppPage() {
 
       <section class="panel">
         <h2>Activity log</h2>
-        <pre id="activity-log" class="log" aria-live="polite"></pre>
+        <pre id="activity-log" class="log">Ready.</pre>
       </section>
     </main>
 

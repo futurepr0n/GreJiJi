@@ -80,6 +80,28 @@ function toUsdLike(cents, currency) {
   }).format(cents / 100);
 }
 
+function centsToDollarsInput(cents) {
+  if (!Number.isInteger(cents) || cents <= 0) {
+    return "";
+  }
+  return (cents / 100).toFixed(2);
+}
+
+function dollarsInputToCents(rawValue, fieldName) {
+  const normalized = String(rawValue ?? "").trim();
+  if (!normalized) {
+    throw new Error(`${fieldName} is required`);
+  }
+  if (!/^\d+(\.\d{1,2})?$/.test(normalized)) {
+    throw new Error(`${fieldName} must be a dollar amount with up to 2 decimals`);
+  }
+  const dollars = Number(normalized);
+  if (!Number.isFinite(dollars) || dollars <= 0) {
+    throw new Error(`${fieldName} must be greater than 0`);
+  }
+  return Math.round(dollars * 100);
+}
+
 function fmtDate(value) {
   if (!value) {
     return "-";
@@ -123,9 +145,11 @@ function renderRoleUI() {
   qs("#admin-launch-control-panel").hidden = role !== "admin";
 
   const authStatus = qs("#auth-status");
-  authStatus.textContent = role
-    ? `Signed in as ${state.user.email} (${role})`
-    : "Sign in to unlock role-aware controls.";
+  const openAuthButton = qs("#open-auth-modal");
+  const logoutButton = qs("#logout-button");
+  authStatus.textContent = role ? `Signed in as ${state.user.email} (${role})` : "Signed out";
+  openAuthButton.textContent = role ? "Switch account" : "Sign in / Register";
+  logoutButton.hidden = !role;
 }
 
 function renderListingDetail() {
@@ -161,7 +185,7 @@ function renderListingDetail() {
     <p><strong>${escapeHtml(listing.title)}</strong> <span class="inline-badge">${escapeHtml(listing.localArea)}</span></p>
     <p>${escapeHtml(listing.description || "No description")}</p>
     <p>Seller: <code>${escapeHtml(listing.sellerId)}</code></p>
-    <p>Price: <strong>${toUsdLike(listing.priceCents, "USD")}</strong> (${escapeHtml(listing.priceCents)} cents)</p>
+    <p>Price: <strong>${toUsdLike(listing.priceCents, "USD")}</strong></p>
     <p>Photo links:</p>
     <ul>${linkedPhotoHtml}</ul>
     <p>Uploaded photos:</p>
@@ -171,7 +195,7 @@ function renderListingDetail() {
 
   const purchaseForm = qs("#purchase-form");
   purchaseForm.sellerId.value = listing.sellerId;
-  purchaseForm.amountCents.value = String(listing.priceCents);
+  purchaseForm.amountDollars.value = centsToDollarsInput(listing.priceCents);
 }
 
 function renderListingReputation() {
@@ -769,16 +793,6 @@ async function loadNotifications() {
   log(`loaded ${payload.notifications.length} notifications`);
 }
 
-async function fileToBase64(file) {
-  const buffer = await file.arrayBuffer();
-  let binary = "";
-  const bytes = new Uint8Array(buffer);
-  for (let i = 0; i < bytes.length; i += 1) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-}
-
 function bindEvents() {
   qs("#register-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -794,6 +808,7 @@ function bindEvents() {
       state.token = payload.token;
       state.user = payload.user;
       renderRoleUI();
+      qs("#auth-modal").close();
       log(`registered and signed in as ${payload.user.role}`);
       await refreshListings();
     } catch (error) {
@@ -813,6 +828,7 @@ function bindEvents() {
       state.token = payload.token;
       state.user = payload.user;
       renderRoleUI();
+      qs("#auth-modal").close();
       log(`logged in as ${payload.user.role}`);
       await refreshListings();
     } catch (error) {
@@ -845,6 +861,33 @@ function bindEvents() {
     log("logged out");
   });
 
+  qs("#open-auth-modal").addEventListener("click", () => {
+    qs("#auth-modal").showModal();
+  });
+
+  qs("#close-auth-modal").addEventListener("click", () => {
+    qs("#auth-modal").close();
+  });
+
+  qs("#auth-modal").addEventListener("click", (event) => {
+    const dialog = qs("#auth-modal");
+    if (event.target === dialog) {
+      dialog.close();
+    }
+  });
+
+  for (const button of document.querySelectorAll(".demo-login")) {
+    button.addEventListener("click", () => {
+      const email = button.getAttribute("data-email") ?? "";
+      const password = button.getAttribute("data-password") ?? "";
+      const loginForm = qs("#login-form");
+      loginForm.email.value = email;
+      loginForm.password.value = password;
+      qs("#auth-modal").showModal();
+      loginForm.email.focus();
+    });
+  }
+
   qs("#refresh-listings").addEventListener("click", async () => {
     try {
       await refreshListings();
@@ -866,7 +909,7 @@ function bindEvents() {
         listingId: form.listingId.value || undefined,
         title: form.title.value,
         description: form.description.value,
-        priceCents: Number(form.priceCents.value),
+        priceCents: dollarsInputToCents(form.priceDollars.value, "price"),
         localArea: form.localArea.value,
         photoUrls
       });
@@ -915,7 +958,7 @@ function bindEvents() {
       const payload = await apiRequest("POST", "/transactions", {
         transactionId: form.transactionId.value || undefined,
         sellerId: form.sellerId.value,
-        amountCents: Number(form.amountCents.value)
+        amountCents: dollarsInputToCents(form.amountDollars.value, "offer amount")
       });
       state.currentTransaction = payload.transaction;
       state.currentTrust = null;

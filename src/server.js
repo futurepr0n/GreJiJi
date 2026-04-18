@@ -28,6 +28,8 @@ const listingPhotoMaxBytes = Number(process.env.LISTING_PHOTO_MAX_BYTES ?? 8 * 1
 const defaultBodyMaxBytes = Number(process.env.REQUEST_BODY_MAX_BYTES ?? 1024 * 1024);
 const requestLogEnabled = String(process.env.REQUEST_LOG_ENABLED ?? "true") !== "false";
 const errorEventLogFile = process.env.ERROR_EVENT_LOG_FILE ?? null;
+const demoSeedEnabled = parseBooleanEnv(process.env.DEMO_SEED_ENABLED, nodeEnv !== "test");
+const demoSeedPassword = process.env.DEMO_SEED_PASSWORD ?? "DemoMarket123!";
 const rateLimitEnabled = String(process.env.RATE_LIMIT_ENABLED ?? "true") !== "false";
 const rateLimitWindowMs = Number(process.env.RATE_LIMIT_WINDOW_MS ?? 60 * 1000);
 const coreFlowAvailabilityTarget = Number(process.env.CORE_FLOW_SLO_AVAILABILITY_TARGET ?? 0.995);
@@ -828,6 +830,157 @@ function mapStoreErrorToStatusCode(error) {
 
 function hashPassword(password, salt) {
   return crypto.scryptSync(password, salt, 64).toString("hex");
+}
+
+function buildDemoCatalog() {
+  const sellers = Array.from({ length: 10 }, (_, index) => {
+    const ordinal = String(index + 1).padStart(2, "0");
+    return {
+      id: `demo-seller-${ordinal}`,
+      email: `demo-seller-${ordinal}@grejiji.demo`,
+      role: "seller",
+      listing: {
+        id: `demo-listing-${ordinal}`,
+        title: `Demo Listing ${ordinal}: Local Item`,
+        description: `Seller ${ordinal} sample inventory for marketplace demo mode.`,
+        priceCents: 2500 + index * 950,
+        localArea: ["Toronto", "Montreal", "Vancouver", "Calgary", "Ottawa"][index % 5],
+        photoUrls: [
+          `https://images.unsplash.com/photo-1556745757-${1000 + index}?auto=format&fit=crop&w=900&q=80`
+        ]
+      }
+    };
+  });
+
+  return {
+    admin: { id: "demo-admin", email: "demo-admin@grejiji.demo", role: "admin" },
+    buyer: { id: "demo-buyer", email: "demo-buyer@grejiji.demo", role: "buyer" },
+    sellers
+  };
+}
+
+function ensureDemoUser(store, { id, email, role, password }) {
+  const auth = store.getUserAuthByEmail(email);
+  if (auth?.user) {
+    return auth.user;
+  }
+
+  const salt = crypto.randomBytes(16).toString("hex");
+  return store.createUser({
+    id,
+    email,
+    role,
+    passwordHash: hashPassword(password, salt),
+    passwordSalt: salt
+  });
+}
+
+function ensureDemoMarketplaceData(store, { enabled = true } = {}) {
+  if (!enabled) {
+    return { enabled: false };
+  }
+
+  const catalog = buildDemoCatalog();
+  const summary = {
+    enabled: true,
+    createdUsers: 0,
+    createdListings: 0,
+    createdTransactions: 0,
+    createdRatings: 0
+  };
+
+  const beforeAdmin = store.getUserAuthByEmail(catalog.admin.email)?.user;
+  ensureDemoUser(store, {
+    ...catalog.admin,
+    password: demoSeedPassword
+  });
+  if (!beforeAdmin) {
+    summary.createdUsers += 1;
+  }
+
+  const beforeBuyer = store.getUserAuthByEmail(catalog.buyer.email)?.user;
+  ensureDemoUser(store, {
+    ...catalog.buyer,
+    password: demoSeedPassword
+  });
+  if (!beforeBuyer) {
+    summary.createdUsers += 1;
+  }
+
+  for (const [index, seller] of catalog.sellers.entries()) {
+    const beforeSeller = store.getUserAuthByEmail(seller.email)?.user;
+    const ensuredSeller = ensureDemoUser(store, {
+      id: seller.id,
+      email: seller.email,
+      role: seller.role,
+      password: demoSeedPassword
+    });
+    if (!beforeSeller) {
+      summary.createdUsers += 1;
+    }
+
+    const existingListing = store.getListingById(seller.listing.id);
+    if (!existingListing) {
+      store.createListing({
+        id: seller.listing.id,
+        sellerId: ensuredSeller.id,
+        title: seller.listing.title,
+        description: seller.listing.description,
+        priceCents: seller.listing.priceCents,
+        localArea: seller.listing.localArea,
+        photoUrls: seller.listing.photoUrls,
+        moderationStatus: "approved",
+        moderationSource: "system_seed",
+        moderationUpdatedBy: catalog.admin.id
+      });
+      summary.createdListings += 1;
+    }
+
+    const transactionId = `demo-history-txn-${String(index + 1).padStart(2, "0")}`;
+    const existingTransaction = store.getTransactionById(transactionId);
+    if (!existingTransaction) {
+      store.createAcceptedTransactionWithPayment({
+        id: transactionId,
+        buyerId: catalog.buyer.id,
+        sellerId: ensuredSeller.id,
+        amountCents: seller.listing.priceCents,
+        actorId: catalog.admin.id,
+        paymentResult: {
+          provider: "local",
+          status: "succeeded",
+          paymentIntentId: null,
+          chargeId: null,
+          raw: { mode: "demo_seed" }
+        },
+        paymentIdempotencyKey: `demo-seed:${transactionId}:authorize_capture:v1`
+      });
+      store.confirmDelivery({ id: transactionId, buyerId: catalog.buyer.id });
+      store.acknowledgeCompletionBySeller({ id: transactionId, sellerId: ensuredSeller.id });
+      summary.createdTransactions += 1;
+    }
+
+    const ratings = store.listTransactionRatings({ transactionId });
+    if (!ratings.some((entry) => entry.raterUserId === catalog.buyer.id)) {
+      store.submitTransactionRating({
+        transactionId,
+        raterUserId: catalog.buyer.id,
+        score: 5 - (index % 2),
+        comment: "Reliable seller. Item matched listing details."
+      });
+      summary.createdRatings += 1;
+    }
+    if (!ratings.some((entry) => entry.raterUserId === ensuredSeller.id)) {
+      store.submitTransactionRating({
+        transactionId,
+        raterUserId: ensuredSeller.id,
+        score: 5,
+        comment: "Buyer paid promptly and completed the handoff."
+      });
+      summary.createdRatings += 1;
+    }
+  }
+
+  return summary;
 }
 
 function timingSafeEqualHex(left, right) {
@@ -1855,6 +2008,7 @@ export function createServer({
   notificationDispatchMaxProcessingMs,
   paymentReconciliationLimit
 } = {}) {
+  const resolvedDatabasePath = databasePath ?? process.env.DATABASE_PATH ?? defaultDatabasePath;
   const resolvedEvidenceStoragePath =
     evidenceStoragePath ?? process.env.EVIDENCE_STORAGE_PATH ?? defaultEvidenceStoragePath;
   const resolvedListingPhotoStoragePath =
@@ -1864,7 +2018,7 @@ export function createServer({
   const resolvedEvidenceMaxBytes = parseEvidenceMaxBytes(evidenceMaxBytes);
   const resolvedListingPhotoMaxBytes = parseEvidenceMaxBytes(listingPhotoMaxBytes);
   const store = createTransactionStore({
-    databasePath: databasePath ?? process.env.DATABASE_PATH ?? defaultDatabasePath,
+    databasePath: resolvedDatabasePath,
     migrationsDirectory,
     releaseTimeoutHours: releaseTimeoutHours ?? parseReleaseTimeoutHours(process.env.RELEASE_TIMEOUT_HOURS),
     serviceFeeFixedCents: parseServiceFeeFixedCents(
@@ -1878,6 +2032,21 @@ export function createServer({
     ),
     dispatchNotification
   });
+  try {
+    const shouldSeedDemo = demoSeedEnabled && resolvedDatabasePath === defaultDatabasePath;
+    const demoSeedSummary = ensureDemoMarketplaceData(store, { enabled: shouldSeedDemo });
+    if (demoSeedSummary.enabled) {
+      logLine("info", {
+        event: "demo.seed.completed",
+        ...demoSeedSummary
+      });
+    }
+  } catch (error) {
+    logLine("error", {
+      event: "demo.seed.failed",
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
   const paymentProvider = createPaymentProvider({
     providerName: paymentProviderName ?? process.env.PAYMENT_PROVIDER ?? "local",
     stripeSecretKey: stripeSecretKey ?? process.env.STRIPE_SECRET_KEY,
