@@ -3735,14 +3735,6 @@ export function createTransactionStore({
   `);
 
   const getListingById = db.prepare("SELECT * FROM listings WHERE id = ?");
-  const listListingsAll = db.prepare(`
-    SELECT *
-    FROM listings
-    WHERE (@moderation_status IS NULL OR moderation_status = @moderation_status)
-      AND (@cursor_created_at IS NULL OR created_at < @cursor_created_at OR (created_at = @cursor_created_at AND id < @cursor_id))
-    ORDER BY created_at DESC, id DESC
-    LIMIT @limit
-  `);
   const listListingsBySeller = db.prepare(`
     SELECT *
     FROM listings
@@ -3752,26 +3744,6 @@ export function createTransactionStore({
     ORDER BY created_at DESC, id DESC
     LIMIT @limit
   `);
-  const listListingsByArea = db.prepare(`
-    SELECT *
-    FROM listings
-    WHERE local_area = @local_area
-      AND (@moderation_status IS NULL OR moderation_status = @moderation_status)
-      AND (@cursor_created_at IS NULL OR created_at < @cursor_created_at OR (created_at = @cursor_created_at AND id < @cursor_id))
-    ORDER BY created_at DESC, id DESC
-    LIMIT @limit
-  `);
-  const listListingsBySellerAndArea = db.prepare(`
-    SELECT *
-    FROM listings
-    WHERE seller_id = @seller_id
-      AND local_area = @local_area
-      AND (@moderation_status IS NULL OR moderation_status = @moderation_status)
-      AND (@cursor_created_at IS NULL OR created_at < @cursor_created_at OR (created_at = @cursor_created_at AND id < @cursor_id))
-    ORDER BY created_at DESC, id DESC
-    LIMIT @limit
-  `);
-
   const updateListingStatement = db.prepare(`
     UPDATE listings
     SET
@@ -10174,7 +10146,13 @@ export function createTransactionStore({
       sellerId,
       localArea,
       moderationStatus,
+      q,
+      minPriceCents,
+      maxPriceCents,
+      sortBy = "createdAt",
+      sortOrder = "desc",
       cursorCreatedAt,
+      cursorPriceCents,
       cursorId
     } = {}) {
       if (!Number.isInteger(limit) || limit <= 0 || limit > 500) {
@@ -10187,6 +10165,38 @@ export function createTransactionStore({
       if (localArea !== undefined && localArea !== null && typeof localArea !== "string") {
         throw new StoreError("validation", "localArea must be a string");
       }
+      if (q !== undefined && q !== null && typeof q !== "string") {
+        throw new StoreError("validation", "q must be a string");
+      }
+      if (
+        minPriceCents !== undefined &&
+        minPriceCents !== null &&
+        (!Number.isInteger(minPriceCents) || minPriceCents < 0)
+      ) {
+        throw new StoreError("validation", "minPriceCents must be a non-negative integer");
+      }
+      if (
+        maxPriceCents !== undefined &&
+        maxPriceCents !== null &&
+        (!Number.isInteger(maxPriceCents) || maxPriceCents < 0)
+      ) {
+        throw new StoreError("validation", "maxPriceCents must be a non-negative integer");
+      }
+      if (
+        minPriceCents !== undefined &&
+        minPriceCents !== null &&
+        maxPriceCents !== undefined &&
+        maxPriceCents !== null &&
+        minPriceCents > maxPriceCents
+      ) {
+        throw new StoreError("validation", "minPriceCents cannot be greater than maxPriceCents");
+      }
+      if (!["createdAt", "priceCents"].includes(sortBy)) {
+        throw new StoreError("validation", "sortBy must be one of: createdAt, priceCents");
+      }
+      if (!["asc", "desc"].includes(sortOrder)) {
+        throw new StoreError("validation", "sortOrder must be one of: asc, desc");
+      }
       if (
         moderationStatus !== undefined &&
         moderationStatus !== null &&
@@ -10194,30 +10204,81 @@ export function createTransactionStore({
       ) {
         throw new StoreError("validation", "invalid moderationStatus");
       }
-      if ((cursorCreatedAt === undefined) !== (cursorId === undefined)) {
-        throw new StoreError("validation", "cursorCreatedAt and cursorId must be provided together");
+      if (cursorId !== undefined && cursorId !== null && typeof cursorId !== "string") {
+        throw new StoreError("validation", "cursorId must be a string");
+      }
+      if (
+        cursorPriceCents !== undefined &&
+        cursorPriceCents !== null &&
+        (!Number.isInteger(cursorPriceCents) || cursorPriceCents < 0)
+      ) {
+        throw new StoreError("validation", "cursorPriceCents must be a non-negative integer");
       }
 
+      if (sortBy === "createdAt") {
+        if ((cursorCreatedAt === undefined) !== (cursorId === undefined)) {
+          throw new StoreError("validation", "cursorCreatedAt and cursorId must be provided together");
+        }
+        if (cursorPriceCents !== undefined && cursorPriceCents !== null) {
+          throw new StoreError("validation", "cursorPriceCents is only supported when sortBy=priceCents");
+        }
+      } else {
+        if ((cursorPriceCents === undefined) !== (cursorId === undefined)) {
+          throw new StoreError("validation", "cursorPriceCents and cursorId must be provided together");
+        }
+        if (cursorCreatedAt !== undefined && cursorCreatedAt !== null) {
+          throw new StoreError("validation", "cursorCreatedAt is only supported when sortBy=createdAt");
+        }
+      }
+
+      const normalizedKeyword = q ? q.trim().toLowerCase() : null;
+      const normalizedSortOrder = sortOrder.toLowerCase();
+      const isAscending = normalizedSortOrder === "asc";
       const params = {
         limit,
         seller_id: sellerId ? sellerId.trim() : null,
         local_area: localArea ? localArea.trim() : null,
+        keyword_like: normalizedKeyword ? `%${normalizedKeyword}%` : null,
+        min_price_cents: minPriceCents ?? null,
+        max_price_cents: maxPriceCents ?? null,
         moderation_status: moderationStatus ?? null,
         cursor_created_at: cursorCreatedAt ? toIsoString(cursorCreatedAt) : null,
+        cursor_price_cents: cursorPriceCents ?? null,
         cursor_id: cursorId ?? null
       };
 
-      let rows;
-      if (params.seller_id && params.local_area) {
-        rows = listListingsBySellerAndArea.all(params);
-      } else if (params.seller_id) {
-        rows = listListingsBySeller.all(params);
-      } else if (params.local_area) {
-        rows = listListingsByArea.all(params);
+      const whereClauses = [
+        "(@seller_id IS NULL OR seller_id = @seller_id)",
+        "(@local_area IS NULL OR local_area = @local_area)",
+        "(@moderation_status IS NULL OR moderation_status = @moderation_status)",
+        "(@min_price_cents IS NULL OR price_cents >= @min_price_cents)",
+        "(@max_price_cents IS NULL OR price_cents <= @max_price_cents)",
+        `(@keyword_like IS NULL OR LOWER(title) LIKE @keyword_like OR LOWER(COALESCE(description, '')) LIKE @keyword_like)`
+      ];
+
+      if (sortBy === "createdAt") {
+        whereClauses.push(
+          isAscending
+            ? "(@cursor_created_at IS NULL OR created_at > @cursor_created_at OR (created_at = @cursor_created_at AND id > @cursor_id))"
+            : "(@cursor_created_at IS NULL OR created_at < @cursor_created_at OR (created_at = @cursor_created_at AND id < @cursor_id))"
+        );
       } else {
-        rows = listListingsAll.all(params);
+        whereClauses.push(
+          isAscending
+            ? "(@cursor_price_cents IS NULL OR price_cents > @cursor_price_cents OR (price_cents = @cursor_price_cents AND id > @cursor_id))"
+            : "(@cursor_price_cents IS NULL OR price_cents < @cursor_price_cents OR (price_cents = @cursor_price_cents AND id < @cursor_id))"
+        );
       }
 
+      const primarySortColumn = sortBy === "priceCents" ? "price_cents" : "created_at";
+      const sql = `
+        SELECT *
+        FROM listings
+        WHERE ${whereClauses.join("\n          AND ")}
+        ORDER BY ${primarySortColumn} ${normalizedSortOrder.toUpperCase()}, id ${normalizedSortOrder.toUpperCase()}
+        LIMIT @limit
+      `;
+      const rows = db.prepare(sql).all(params);
       return rows.map(mapListing);
     },
 

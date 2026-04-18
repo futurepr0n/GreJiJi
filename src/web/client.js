@@ -13,7 +13,14 @@ const state = {
   selectedRiskAccountId: null,
   launchControlFlags: [],
   transactionInboxRows: [],
-  transactionInboxPaging: { limit: 20, nextCursor: null }
+  transactionInboxPaging: { limit: 20, nextCursor: null },
+  listingSearch: {
+    q: "",
+    minPriceCents: null,
+    maxPriceCents: null,
+    sortBy: "createdAt",
+    sortOrder: "desc"
+  }
 };
 
 function qs(selector) {
@@ -100,6 +107,21 @@ function dollarsInputToCents(rawValue, fieldName) {
   const dollars = Number(normalized);
   if (!Number.isFinite(dollars) || dollars <= 0) {
     throw new Error(`${fieldName} must be greater than 0`);
+  }
+  return Math.round(dollars * 100);
+}
+
+function optionalDollarsInputToCents(rawValue, fieldName) {
+  const normalized = String(rawValue ?? "").trim();
+  if (!normalized) {
+    return null;
+  }
+  if (!/^\d+(\.\d{1,2})?$/.test(normalized)) {
+    throw new Error(`${fieldName} must be a dollar amount with up to 2 decimals`);
+  }
+  const dollars = Number(normalized);
+  if (!Number.isFinite(dollars) || dollars < 0) {
+    throw new Error(`${fieldName} must be at least 0`);
   }
   return Math.round(dollars * 100);
 }
@@ -841,12 +863,26 @@ function renderNotifications(notifications) {
 }
 
 async function refreshListings() {
-  const payload = await apiRequest("GET", "/listings");
+  const search = new URLSearchParams();
+  if (state.listingSearch.q) {
+    search.set("q", state.listingSearch.q);
+  }
+  if (Number.isInteger(state.listingSearch.minPriceCents)) {
+    search.set("minPriceCents", String(state.listingSearch.minPriceCents));
+  }
+  if (Number.isInteger(state.listingSearch.maxPriceCents)) {
+    search.set("maxPriceCents", String(state.listingSearch.maxPriceCents));
+  }
+  search.set("sortBy", state.listingSearch.sortBy);
+  search.set("sortOrder", state.listingSearch.sortOrder);
+  const payload = await apiRequest("GET", `/listings?${search.toString()}`);
   state.listings = payload.listings;
   renderListings();
   renderListingDetail();
   renderListingReputation();
-  log(`loaded ${payload.listings.length} listings`);
+  log(
+    `loaded ${payload.listings.length} listings (q=${state.listingSearch.q || "-"}, sort=${state.listingSearch.sortBy}:${state.listingSearch.sortOrder})`
+  );
 }
 
 async function loadListingReputation(sellerId) {
@@ -1024,7 +1060,43 @@ function bindEvents() {
     });
   }
 
-  qs("#refresh-listings").addEventListener("click", async () => {
+  qs("#listing-search-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const form = event.currentTarget;
+      const q = String(form.q.value ?? "").trim();
+      const minPriceCents = optionalDollarsInputToCents(form.minPriceDollars.value, "min price");
+      const maxPriceCents = optionalDollarsInputToCents(form.maxPriceDollars.value, "max price");
+      if (
+        Number.isInteger(minPriceCents) &&
+        Number.isInteger(maxPriceCents) &&
+        minPriceCents > maxPriceCents
+      ) {
+        throw new Error("min price cannot be greater than max price");
+      }
+      state.listingSearch = {
+        q,
+        minPriceCents,
+        maxPriceCents,
+        sortBy: form.sortBy.value,
+        sortOrder: form.sortOrder.value
+      };
+      await refreshListings();
+    } catch (error) {
+      log(error.message, "error");
+    }
+  });
+
+  qs("#reset-listing-search").addEventListener("click", async () => {
+    const form = qs("#listing-search-form");
+    form.reset();
+    state.listingSearch = {
+      q: "",
+      minPriceCents: null,
+      maxPriceCents: null,
+      sortBy: "createdAt",
+      sortOrder: "desc"
+    };
     try {
       await refreshListings();
     } catch (error) {

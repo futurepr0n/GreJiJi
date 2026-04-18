@@ -105,6 +105,90 @@ test("listings feed supports filter + keyset pagination", async () => {
   });
 });
 
+test("listings feed supports discovery search, price filters, and deterministic price cursor pagination", async () => {
+  await withTestServer(async ({ request }) => {
+    const seller = await request("POST", "/auth/register", {
+      userId: "discovery-seller",
+      email: "discovery-seller@example.com",
+      password: "seller-password",
+      role: "seller"
+    });
+    assert.equal(seller.response.status, 201);
+
+    const fixtures = [
+      { id: "disc-a", title: "Vintage Bike Frame", description: "blue steel frame", priceCents: 12000 },
+      { id: "disc-b", title: "Gaming Console Bundle", description: "retro console + 3 games", priceCents: 15000 },
+      { id: "disc-c", title: "Mountain Bike Helmet", description: "helmet for bike rides", priceCents: 4500 },
+      { id: "disc-d", title: "Desk Lamp", description: "warm light", priceCents: 2500 }
+    ];
+
+    for (const fixture of fixtures) {
+      const listing = await request(
+        "POST",
+        "/listings",
+        {
+          listingId: fixture.id,
+          title: fixture.title,
+          description: fixture.description,
+          priceCents: fixture.priceCents,
+          localArea: "Toronto"
+        },
+        seller.payload.token
+      );
+      assert.equal(listing.response.status, 201);
+    }
+
+    const filtered = await request(
+      "GET",
+      "/listings?q=bike&minPriceCents=4000&maxPriceCents=13000&sortBy=priceCents&sortOrder=asc"
+    );
+    assert.equal(filtered.response.status, 200);
+    assert.deepEqual(
+      filtered.payload.listings.map((listing) => listing.id),
+      ["disc-c", "disc-a"]
+    );
+
+    const pageOne = await request("GET", "/listings?sortBy=priceCents&sortOrder=asc&limit=2");
+    assert.equal(pageOne.response.status, 200);
+    assert.equal(pageOne.payload.listings.length, 2);
+    assert.equal(pageOne.payload.listings[0].id, "disc-d");
+    assert.equal(pageOne.payload.listings[1].id, "disc-c");
+
+    const cursor = pageOne.payload.listings[pageOne.payload.listings.length - 1];
+    const pageTwo = await request(
+      "GET",
+      `/listings?sortBy=priceCents&sortOrder=asc&limit=2&cursorPriceCents=${encodeURIComponent(
+        cursor.priceCents
+      )}&cursorId=${encodeURIComponent(cursor.id)}`
+    );
+    assert.equal(pageTwo.response.status, 200);
+    assert.ok(pageTwo.payload.listings.length >= 1);
+    if (pageTwo.payload.listings.length > 0) {
+      assert.ok(pageTwo.payload.listings[0].priceCents >= cursor.priceCents);
+      assert.notEqual(pageTwo.payload.listings[0].id, cursor.id);
+    }
+  });
+});
+
+test("listings feed rejects invalid discovery query combinations", async () => {
+  await withTestServer(async ({ request }) => {
+    const invalidSortBy = await request("GET", "/listings?sortBy=updatedAt");
+    assert.equal(invalidSortBy.response.status, 400);
+    assert.match(invalidSortBy.payload.error, /sortBy/i);
+
+    const invalidPriceRange = await request("GET", "/listings?minPriceCents=600&maxPriceCents=500");
+    assert.equal(invalidPriceRange.response.status, 400);
+    assert.match(invalidPriceRange.payload.error, /minPriceCents/i);
+
+    const invalidCursor = await request(
+      "GET",
+      "/listings?sortBy=priceCents&sortOrder=asc&cursorCreatedAt=2026-01-01T00:00:00.000Z&cursorPriceCents=1200&cursorId=abc"
+    );
+    assert.equal(invalidCursor.response.status, 400);
+    assert.match(invalidCursor.payload.error, /cursorCreatedAt/i);
+  });
+});
+
 test("transaction cache invalidates on lifecycle mutation", async () => {
   await withTestServer(async ({ request }) => {
     const seller = await request("POST", "/auth/register", {

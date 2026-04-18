@@ -92,9 +92,36 @@ export function renderWebAppPage() {
 
       <section class="panel" id="listings-panel">
         <h2>Listings Marketplace</h2>
-        <div class="actions">
-          <button type="button" id="refresh-listings">Refresh listings</button>
-        </div>
+        <form id="listing-search-form" class="card">
+          <h3>Discovery filters</h3>
+          <div class="grid four">
+            <label>Keyword
+              <input id="listing-search-q" name="q" placeholder="console, bike, jacket" />
+            </label>
+            <label>Min price (USD)
+              <input id="listing-search-min-price" name="minPriceDollars" type="number" min="0" step="0.01" inputmode="decimal" placeholder="10.00" />
+            </label>
+            <label>Max price (USD)
+              <input id="listing-search-max-price" name="maxPriceDollars" type="number" min="0" step="0.01" inputmode="decimal" placeholder="250.00" />
+            </label>
+            <label>Sort
+              <div class="inline-two">
+                <select id="listing-search-sort-by" name="sortBy">
+                  <option value="createdAt">Newest/Oldest</option>
+                  <option value="priceCents">Price</option>
+                </select>
+                <select id="listing-search-sort-order" name="sortOrder">
+                  <option value="desc">Desc</option>
+                  <option value="asc">Asc</option>
+                </select>
+              </div>
+            </label>
+          </div>
+          <div class="actions">
+            <button type="submit" id="refresh-listings">Apply filters</button>
+            <button type="button" class="ghost" id="reset-listing-search">Reset</button>
+          </div>
+        </form>
         <div class="grid two">
           <div class="card">
             <h3>Available listings</h3>

@@ -180,6 +180,9 @@ test("GET /app and static assets serve the responsive web UI shell", async () =>
     assert.match(appPage.payload, /id="admin-risk-panel"/);
     assert.match(appPage.payload, /id="transaction-inbox-list"/);
     assert.match(appPage.payload, /id="load-transaction-inbox"/);
+    assert.match(appPage.payload, /id="listing-search-form"/);
+    assert.match(appPage.payload, /id="listing-search-sort-by"/);
+    assert.match(appPage.payload, /id="listing-search-sort-order"/);
     assert.match(appPage.payload, /id="admin-moderation-action-form"/);
     assert.match(appPage.payload, /id="admin-risk-action-form"/);
     assert.match(appPage.payload, /src="\/app\/client.js"/);
@@ -191,6 +194,10 @@ test("GET /app and static assets serve the responsive web UI shell", async () =>
     assert.match(client.payload, /renderRoleUI/);
     assert.match(client.payload, /loadTransactionInbox/);
     assert.match(client.payload, /\/transactions\?/);
+    assert.match(client.payload, /minPriceCents/);
+    assert.match(client.payload, /maxPriceCents/);
+    assert.match(client.payload, /sortBy/);
+    assert.match(client.payload, /sortOrder/);
     assert.match(client.payload, /loadModerationDetail/);
     assert.match(client.payload, /loadTransactionRiskDetail/);
 

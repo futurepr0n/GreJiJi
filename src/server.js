@@ -2815,15 +2815,30 @@ export function createServer({
         const limit = limitRaw === null ? 100 : Number(limitRaw);
         const sellerId = url.searchParams.get("sellerId") ?? undefined;
         const localArea = url.searchParams.get("localArea") ?? undefined;
+        const q = url.searchParams.get("q") ?? undefined;
+        const minPriceRaw = url.searchParams.get("minPriceCents");
+        const minPriceCents = minPriceRaw === null ? undefined : Number(minPriceRaw);
+        const maxPriceRaw = url.searchParams.get("maxPriceCents");
+        const maxPriceCents = maxPriceRaw === null ? undefined : Number(maxPriceRaw);
+        const sortBy = url.searchParams.get("sortBy") ?? "createdAt";
+        const sortOrder = url.searchParams.get("sortOrder") ?? "desc";
         const cursorCreatedAt = url.searchParams.get("cursorCreatedAt") ?? undefined;
+        const cursorPriceRaw = url.searchParams.get("cursorPriceCents");
+        const cursorPriceCents = cursorPriceRaw === null ? undefined : Number(cursorPriceRaw);
         const cursorId = url.searchParams.get("cursorId") ?? undefined;
         const moderationStatus = sellerId ? undefined : "approved";
         const cacheKey = JSON.stringify({
           limit,
           sellerId: sellerId ?? null,
           localArea: localArea ?? null,
+          q: q ?? null,
+          minPriceCents: minPriceCents ?? null,
+          maxPriceCents: maxPriceCents ?? null,
+          sortBy,
+          sortOrder,
           moderationStatus: moderationStatus ?? null,
           cursorCreatedAt: cursorCreatedAt ?? null,
+          cursorPriceCents: cursorPriceCents ?? null,
           cursorId: cursorId ?? null
         });
         const cachedListings = getFromCache(
@@ -2841,8 +2856,14 @@ export function createServer({
           limit,
           sellerId,
           localArea,
+          q,
+          minPriceCents,
+          maxPriceCents,
+          sortBy,
+          sortOrder,
           moderationStatus,
           cursorCreatedAt,
+          cursorPriceCents,
           cursorId
         });
         setInCache(listingsCache, cacheKey, listings, resolvedListingsCacheMaxEntries);
