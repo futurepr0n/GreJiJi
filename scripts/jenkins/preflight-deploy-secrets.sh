@@ -48,7 +48,7 @@ read_config_value() {
 is_placeholder_secret() {
   local value
   value="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
-  [[ -z "$value" || "$value" == "change-me" || "$value" == "your-secret" ]]
+  [[ -z "$value" || "$value" == "change-me" || "$value" == "your-secret" || "$value" == "local-dev-secret-change-me" ]]
 }
 
 main() {
@@ -68,7 +68,7 @@ main() {
   done
 
   if [[ "${#missing_keys[@]}" -gt 0 ]]; then
-    fail "Missing required deploy secrets: ${missing_keys[*]}. Remediation: set Jenkins credentials or build parameters for these keys before Deploy Docker."
+    fail "Missing required deploy secrets: ${missing_keys[*]}. Remediation: set non-placeholder Jenkins password parameters or environment credentials for these exact keys (for example AUTH_TOKEN_SECRET) before Deploy Docker."
   fi
 
   log "Required deploy secrets present: ${credential_keys[*]}"

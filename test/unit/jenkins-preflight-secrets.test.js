@@ -45,3 +45,12 @@ test("preflight succeeds when AUTH_TOKEN_SECRET is present", () => {
   assert.match(result.stdout, /Required deploy secrets present: AUTH_TOKEN_SECRET/i);
 });
 
+test("preflight fails when AUTH_TOKEN_SECRET uses local development placeholder", () => {
+  const result = runPreflight({
+    envFileBody: "PAYMENT_PROVIDER=none\nAUTH_TOKEN_SECRET=local-dev-secret-change-me\n"
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Missing required deploy secrets: AUTH_TOKEN_SECRET/i);
+  assert.match(result.stderr, /set non-placeholder Jenkins password parameters/i);
+});

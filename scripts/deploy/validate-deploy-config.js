@@ -52,7 +52,12 @@ function isPlaceholder(value) {
     return true;
   }
   const normalized = value.trim().toLowerCase();
-  return !normalized || normalized === "change-me" || normalized === "your-secret";
+  return (
+    !normalized ||
+    normalized === "change-me" ||
+    normalized === "your-secret" ||
+    normalized === "local-dev-secret-change-me"
+  );
 }
 
 const args = parseArgs(process.argv.slice(2));

@@ -21,7 +21,10 @@ const webStylesFilePath = path.join(__dirname, "web", "styles.css");
 const port = Number(process.env.PORT ?? 3000);
 const host = process.env.HOST ?? "0.0.0.0";
 const nodeEnv = process.env.NODE_ENV ?? "development";
-const authTokenSecret = process.env.AUTH_TOKEN_SECRET ?? "local-dev-secret-change-me";
+const authTokenSecret = resolveAuthTokenSecret({
+  nodeEnv,
+  authTokenSecret: process.env.AUTH_TOKEN_SECRET
+});
 const tokenTtlSeconds = Number(process.env.AUTH_TOKEN_TTL_SECONDS ?? 60 * 60 * 12);
 const evidenceMaxBytes = Number(process.env.EVIDENCE_MAX_BYTES ?? 5 * 1024 * 1024);
 const listingPhotoMaxBytes = Number(process.env.LISTING_PHOTO_MAX_BYTES ?? 8 * 1024 * 1024);
@@ -208,6 +211,41 @@ const launchControlFlagKeys = new Set([
   "dispute_auto_transitions",
   "moderation_auto_actions"
 ]);
+
+function isPlaceholderSecret(value) {
+  if (typeof value !== "string") {
+    return true;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return (
+    !normalized ||
+    normalized === "change-me" ||
+    normalized === "your-secret" ||
+    normalized === "local-dev-secret-change-me"
+  );
+}
+
+function resolveAuthTokenSecret({ nodeEnv, authTokenSecret }) {
+  const normalizedNodeEnv = String(nodeEnv ?? "development").trim().toLowerCase();
+  const isDevelopmentLikeEnv =
+    normalizedNodeEnv === "development" || normalizedNodeEnv === "test";
+
+  if (isDevelopmentLikeEnv) {
+    if (typeof authTokenSecret === "string" && authTokenSecret.trim().length > 0) {
+      return authTokenSecret;
+    }
+    return "local-dev-secret-change-me";
+  }
+
+  if (isPlaceholderSecret(authTokenSecret)) {
+    throw new Error(
+      "AUTH_TOKEN_SECRET must be set to a non-placeholder value when NODE_ENV is not development/test."
+    );
+  }
+
+  return authTokenSecret;
+}
 
 function parseReleaseTimeoutHours(value) {
   const parsed = Number(value ?? 72);

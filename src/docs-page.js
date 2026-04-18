@@ -399,6 +399,7 @@ DEMO_SEED_ENABLED=true npm start
             <h2 id="operations-title">Operations</h2>
             <p>Run the service locally with <code>npm start</code> and verify behavior with <code>npm test</code>.</p>
             <p>For Jenkins-based Docker delivery, provision or refresh the pipeline job with <code>npm run jenkins:provision</code> after setting Jenkins API credentials and repository settings.</p>
+            <p>Jenkins deploy gates require a non-placeholder <code>AUTH_TOKEN_SECRET</code> (password parameter or injected credential) before <code>Deploy Secrets Preflight</code> runs.</p>
             <p>Jenkins provisioning defaults to a root-level <code>GreJiJi</code> job when <code>JENKINS_FOLDER</code> is unset. Legacy <code>GreJiJi/deploy</code> setups remain supported by setting <code>JENKINS_FOLDER=GreJiJi</code> and <code>JENKINS_JOB=deploy</code>.</p>
             <div class="callout" role="note" aria-label="Operations note">
               For incident handoff, treat a <code>409</code> evidence-bundle export response as an integrity failure. Resolve missing artifacts or hash drift before distributing the bundle downstream.
