@@ -552,6 +552,9 @@ function getRouteMetricLabels(method, pathname) {
   if (method === "POST" && pathname === "/transactions") {
     return { pathTemplate: "/transactions", flow: "transaction.create", coreFlow: true };
   }
+  if (method === "GET" && pathname === "/transactions") {
+    return { pathTemplate: "/transactions", flow: "transaction.list", coreFlow: false };
+  }
   if (method === "POST" && /^\/transactions\/[^/]+\/confirm-delivery$/.test(pathname)) {
     return {
       pathTemplate: "/transactions/:id/confirm-delivery",
@@ -3275,6 +3278,37 @@ export function createServer({
         cacheTransaction(transaction);
         incrementMetric("transaction.state_transition.total", { to: "accepted" }, 1);
         sendJson(res, 201, { transaction });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/transactions") {
+        const currentUser = requireAuth(req, store);
+        const limitRaw = url.searchParams.get("limit");
+        const limit = limitRaw === null ? 20 : Number(limitRaw);
+        const status = url.searchParams.get("status") ?? undefined;
+        const cursorUpdatedAt = url.searchParams.get("cursorUpdatedAt") ?? undefined;
+        const cursorId = url.searchParams.get("cursorId") ?? undefined;
+        const transactions = store.listTransactionsForUser({
+          userId: currentUser.id,
+          status,
+          limit,
+          cursorUpdatedAt,
+          cursorId
+        });
+        const nextCursor =
+          transactions.length === limit && transactions.length > 0
+            ? {
+                updatedAt: transactions[transactions.length - 1].updatedAt,
+                id: transactions[transactions.length - 1].id
+              }
+            : null;
+        sendJson(res, 200, {
+          transactions,
+          paging: {
+            limit,
+            nextCursor
+          }
+        });
         return;
       }
 

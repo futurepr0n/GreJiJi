@@ -1355,6 +1355,64 @@ export function createTransactionStore({
   `);
 
   const getTransactionByIdQuery = db.prepare("SELECT * FROM transactions WHERE id = ?");
+  const listTransactionsByParticipant = db.prepare(`
+    SELECT
+      t.id,
+      t.buyer_id,
+      t.seller_id,
+      t.amount_cents,
+      t.total_buyer_charge_cents,
+      t.currency_code,
+      t.status,
+      t.dispute_opened_at,
+      t.dispute_resolved_at,
+      t.created_at,
+      t.updated_at,
+      CASE
+        WHEN t.buyer_id = @user_id THEN 'buyer'
+        ELSE 'seller'
+      END AS participant_role,
+      CASE
+        WHEN t.buyer_id = @user_id THEN t.seller_id
+        ELSE t.buyer_id
+      END AS counterparty_user_id,
+      CASE
+        WHEN t.buyer_id = @user_id THEN seller.email
+        ELSE buyer.email
+      END AS counterparty_email,
+      (
+        SELECT l.title
+        FROM listings l
+        WHERE l.seller_id = t.seller_id
+        ORDER BY l.updated_at DESC, l.id DESC
+        LIMIT 1
+      ) AS listing_title,
+      (
+        SELECT COUNT(1)
+        FROM transaction_ratings tr
+        WHERE tr.transaction_id = t.id
+      ) AS rating_count,
+      (
+        SELECT COUNT(1)
+        FROM transaction_ratings tr
+        WHERE tr.transaction_id = t.id
+          AND tr.rater_user_id = @user_id
+      ) AS my_rating_count
+    FROM transactions t
+    LEFT JOIN users buyer
+      ON buyer.id = t.buyer_id
+    LEFT JOIN users seller
+      ON seller.id = t.seller_id
+    WHERE (t.buyer_id = @user_id OR t.seller_id = @user_id)
+      AND (@status IS NULL OR t.status = @status)
+      AND (
+        @cursor_updated_at IS NULL
+        OR t.updated_at < @cursor_updated_at
+        OR (t.updated_at = @cursor_updated_at AND t.id < @cursor_id)
+      )
+    ORDER BY t.updated_at DESC, t.id DESC
+    LIMIT @limit
+  `);
   const insertTransactionEvent = db.prepare(`
     INSERT INTO transaction_events (
       transaction_id,
@@ -10911,6 +10969,87 @@ export function createTransactionStore({
 
     getTransactionById(id) {
       return mapTransaction(getTransactionByIdQuery.get(id));
+    },
+
+    listTransactionsForUser({
+      userId,
+      status,
+      limit = 20,
+      cursorUpdatedAt = null,
+      cursorId = null
+    }) {
+      if (!userId || typeof userId !== "string") {
+        throw new StoreError("validation", "userId is required");
+      }
+      if (!Number.isInteger(limit) || limit <= 0 || limit > 100) {
+        throw new StoreError("validation", "limit must be an integer between 1 and 100");
+      }
+      const normalizedStatus = status === undefined || status === null ? null : String(status).trim();
+      if (normalizedStatus !== null && !VALID_STATUSES.has(normalizedStatus)) {
+        throw new StoreError("validation", "status must be accepted, disputed, or completed");
+      }
+
+      let normalizedCursorUpdatedAt = null;
+      if (cursorUpdatedAt !== undefined && cursorUpdatedAt !== null) {
+        normalizedCursorUpdatedAt = toIsoString(String(cursorUpdatedAt));
+      }
+      let normalizedCursorId = null;
+      if (normalizedCursorUpdatedAt !== null) {
+        if (!cursorId || typeof cursorId !== "string") {
+          throw new StoreError(
+            "validation",
+            "cursorId is required when cursorUpdatedAt is provided"
+          );
+        }
+        normalizedCursorId = cursorId;
+      }
+
+      const rows = listTransactionsByParticipant.all({
+        user_id: userId,
+        status: normalizedStatus,
+        cursor_updated_at: normalizedCursorUpdatedAt,
+        cursor_id: normalizedCursorId,
+        limit
+      });
+      return rows.map((row) => {
+        const participantRole = row.participant_role === "buyer" ? "buyer" : "seller";
+        const ratingCount = Number(row.rating_count ?? 0);
+        const myRatingCount = Number(row.my_rating_count ?? 0);
+        const openDispute =
+          row.status === "disputed" || (row.dispute_opened_at && !row.dispute_resolved_at);
+        const availableActions = [];
+        if (row.status === "accepted") {
+          availableActions.push("open_dispute");
+          if (participantRole === "buyer") {
+            availableActions.push("confirm_delivery");
+          }
+        }
+        if (row.status === "completed" && participantRole === "seller") {
+          availableActions.push("acknowledge_completion");
+        }
+        if (row.status === "completed" && myRatingCount === 0) {
+          availableActions.push("submit_rating");
+        }
+
+        return {
+          id: row.id,
+          participantRole,
+          counterpartyUserId: row.counterparty_user_id,
+          counterpartyDisplayName: row.counterparty_email ?? row.counterparty_user_id,
+          listingTitle: row.listing_title ?? null,
+          amountCents: Number(row.amount_cents),
+          totalBuyerChargeCents: Number(row.total_buyer_charge_cents),
+          currency: row.currency_code,
+          status: row.status,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+          hasOpenDispute: Boolean(openDispute),
+          hasAnyRatings: ratingCount > 0,
+          ratingSubmittedByCurrentUser: myRatingCount > 0,
+          canSubmitRating: row.status === "completed" && myRatingCount === 0,
+          availableActions
+        };
+      });
     },
 
     listTransactionRatings({ transactionId }) {

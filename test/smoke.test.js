@@ -178,6 +178,8 @@ test("GET /app and static assets serve the responsive web UI shell", async () =>
     assert.match(appPage.payload, /id="admin-disputes-panel"/);
     assert.match(appPage.payload, /id="admin-moderation-panel"/);
     assert.match(appPage.payload, /id="admin-risk-panel"/);
+    assert.match(appPage.payload, /id="transaction-inbox-list"/);
+    assert.match(appPage.payload, /id="load-transaction-inbox"/);
     assert.match(appPage.payload, /id="admin-moderation-action-form"/);
     assert.match(appPage.payload, /id="admin-risk-action-form"/);
     assert.match(appPage.payload, /src="\/app\/client.js"/);
@@ -187,6 +189,8 @@ test("GET /app and static assets serve the responsive web UI shell", async () =>
     assert.match(client.response.headers.get("content-type") ?? "", /text\/javascript/);
     assert.match(client.payload, /async function apiRequest/);
     assert.match(client.payload, /renderRoleUI/);
+    assert.match(client.payload, /loadTransactionInbox/);
+    assert.match(client.payload, /\/transactions\?/);
     assert.match(client.payload, /loadModerationDetail/);
     assert.match(client.payload, /loadTransactionRiskDetail/);
 
@@ -249,6 +253,114 @@ test("protected transaction route rejects unauthenticated requests", async () =>
 
     assert.equal(unauthenticated.response.status, 403);
     assert.match(unauthenticated.payload.error, /token/i);
+  });
+});
+
+test("GET /transactions returns participant-scoped inbox rows with status filters", async () => {
+  await withTestServer({}, async ({ requestJson, registerUser }) => {
+    const seller = await registerUser({
+      userId: "inbox-seller-1",
+      email: "inbox-seller-1@example.com",
+      password: "seller-password",
+      role: "seller"
+    });
+    const buyer = await registerUser({
+      userId: "inbox-buyer-1",
+      email: "inbox-buyer-1@example.com",
+      password: "buyer-password",
+      role: "buyer"
+    });
+    const outsider = await registerUser({
+      userId: "inbox-outsider-1",
+      email: "inbox-outsider-1@example.com",
+      password: "buyer-password",
+      role: "buyer"
+    });
+
+    const first = await requestJson(
+      "POST",
+      "/transactions",
+      {
+        transactionId: "txn-inbox-1",
+        buyerId: buyer.user.id,
+        amountCents: 12000
+      },
+      seller.token
+    );
+    assert.equal(first.response.status, 201);
+
+    const second = await requestJson(
+      "POST",
+      "/transactions",
+      {
+        transactionId: "txn-inbox-2",
+        buyerId: buyer.user.id,
+        amountCents: 19000
+      },
+      seller.token
+    );
+    assert.equal(second.response.status, 201);
+
+    const completed = await requestJson(
+      "POST",
+      "/transactions/txn-inbox-1/confirm-delivery",
+      {},
+      buyer.token
+    );
+    assert.equal(completed.response.status, 200);
+
+    const disputed = await requestJson(
+      "POST",
+      "/transactions/txn-inbox-2/disputes",
+      {},
+      buyer.token
+    );
+    assert.equal(disputed.response.status, 200);
+
+    const buyerInbox = await requestJson("GET", "/transactions?limit=20", undefined, buyer.token);
+    assert.equal(buyerInbox.response.status, 200);
+    assert.equal(buyerInbox.payload.transactions.length, 2);
+    assert.equal(buyerInbox.payload.transactions[0].id, "txn-inbox-2");
+    assert.equal(buyerInbox.payload.transactions[1].id, "txn-inbox-1");
+    assert.equal(buyerInbox.payload.transactions[0].counterpartyUserId, seller.user.id);
+    assert.equal(typeof buyerInbox.payload.transactions[0].counterpartyDisplayName, "string");
+    assert.equal(buyerInbox.payload.transactions[0].hasOpenDispute, true);
+    assert.equal(Array.isArray(buyerInbox.payload.transactions[0].availableActions), true);
+    assert.equal(buyerInbox.payload.paging.limit, 20);
+
+    const completedOnly = await requestJson(
+      "GET",
+      "/transactions?status=completed",
+      undefined,
+      buyer.token
+    );
+    assert.equal(completedOnly.response.status, 200);
+    assert.equal(completedOnly.payload.transactions.length, 1);
+    assert.equal(completedOnly.payload.transactions[0].id, "txn-inbox-1");
+    assert.equal(completedOnly.payload.transactions[0].status, "completed");
+
+    const disputedOnly = await requestJson(
+      "GET",
+      "/transactions?status=disputed",
+      undefined,
+      buyer.token
+    );
+    assert.equal(disputedOnly.response.status, 200);
+    assert.equal(disputedOnly.payload.transactions.length, 1);
+    assert.equal(disputedOnly.payload.transactions[0].id, "txn-inbox-2");
+    assert.equal(disputedOnly.payload.transactions[0].status, "disputed");
+
+    const outsiderInbox = await requestJson("GET", "/transactions", undefined, outsider.token);
+    assert.equal(outsiderInbox.response.status, 200);
+    assert.equal(outsiderInbox.payload.transactions.length, 0);
+
+    const invalidStatus = await requestJson(
+      "GET",
+      "/transactions?status=unknown",
+      undefined,
+      buyer.token
+    );
+    assert.equal(invalidStatus.response.status, 400);
   });
 });
 

@@ -233,6 +233,9 @@ export function renderDocsPage() {
             <div class="callout" role="note" aria-label="Documentation note">
               The repo also includes Markdown docs in <code>docs/api-reference.md</code> and <code>docs/operations.md</code>.
             </div>
+            <div class="callout" role="note" aria-label="Trust contract note">
+              The current mainline build treats legacy <code>trust-ops-v17</code> runtime surfaces as superseded. Release-gate evidence for the shipped contract: <code>npm run test:unit</code> 3/3, <code>npm run test:integration</code> 26/26, and <code>npm run test:e2e</code> 23/23.
+            </div>
             <table>
               <thead>
                 <tr>
@@ -251,7 +254,7 @@ export function renderDocsPage() {
                 </tr>
                 <tr>
                   <td>Transactions</td>
-                  <td><code>POST /transactions</code>, <code>GET /transactions/:id</code>, <code>GET /transactions/:id/events</code>, <code>GET /transactions/:id/trust</code></td>
+                  <td><code>GET /transactions</code>, <code>POST /transactions</code>, <code>GET /transactions/:id</code>, <code>GET /transactions/:id/events</code></td>
                 </tr>
                 <tr>
                   <td>Disputes</td>
@@ -374,6 +377,9 @@ DEMO_SEED_ENABLED=true npm start
             </details>
             <div class="callout" role="note" aria-label="Trust route note">
               Deep-dive routes: <code>GET /transactions/:id/trust</code> returns the latest assessment history, and <code>POST /admin/trust-operations/cases/:caseId/evidence-bundle/export</code> produces the current v17 review bundle.
+            </div>
+            <div class="callout" role="note" aria-label="Trust deprecation note">
+              Investigator and automation workflows should target the current mainline trust-operations APIs. Legacy <code>trust-ops-v17</code> runtime surfaces are superseded and intentionally absent from this build.
             </div>
           </section>
 

@@ -12,6 +12,9 @@ GreJiJi is a Node.js + SQLite backend for local marketplace escrow, disputes, an
 > [!NOTE]
 > The live HTML version of this reference is served by the app at `GET /docs`.
 
+> [!WARNING]
+> Contract status for the landed mainline trust merge (`7d4e901`): the current trust-operations APIs are canonical, and legacy `trust-ops-v17` runtime surfaces are superseded. Release-gate evidence for this contract: `npm run test:unit` (`3/3`), `npm run test:integration` (`26/26`), and `npm run test:e2e` (`23/23`).
+
 ## Table of Contents
 
 - [Runtime and configuration](#runtime-and-configuration)
@@ -272,6 +275,9 @@ Request body:
 ```
 
 ### Risk and intervention operations
+
+> [!NOTE]
+> Only the current mainline trust-operations routes below are supported in this build. Do not depend on removed `trust-ops-v17` runtime surfaces when integrating investigator or recovery workflows.
 
 #### `GET /admin/risk-signals`
 
@@ -783,6 +789,23 @@ Required server-side invariants:
 - `paymentProvider`, `paymentStatus`, `providerPaymentIntentId`, `providerChargeId`, and `providerLastRefundId` are returned for reconciliation/audit.
 - Settlement outcomes (`completed`, `refunded`, `cancelled`) persist immutable final snapshot fields:
   `settledBuyerCharge`, `settledSellerPayout`, and `settledPlatformFee`.
+
+#### `GET /transactions`
+
+Authenticated participant inbox endpoint. Returns only transactions where the current user is the buyer or seller.
+
+Query params:
+
+- `status` (optional: `accepted | disputed | completed`)
+- `limit` (optional integer `1..100`, default `20`)
+- `cursorUpdatedAt` + `cursorId` (optional keyset pagination cursor pair)
+
+Ordering is deterministic: `updatedAt DESC, id DESC`.
+
+Response includes:
+
+- `transactions[]` summary rows with id, listing/counterparty summary, amount, status, timestamps, dispute/rating indicators, and available action affordances
+- `paging.nextCursor` when more rows may be available
 
 #### `GET /transactions/:transactionId`
 

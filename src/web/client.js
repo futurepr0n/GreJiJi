@@ -11,7 +11,9 @@ const state = {
   selectedModerationListingId: null,
   selectedRiskTransactionId: null,
   selectedRiskAccountId: null,
-  launchControlFlags: []
+  launchControlFlags: [],
+  transactionInboxRows: [],
+  transactionInboxPaging: { limit: 20, nextCursor: null }
 };
 
 function qs(selector) {
@@ -298,6 +300,65 @@ function renderListings() {
       });
     });
     item.append(text, button);
+    listNode.appendChild(item);
+  }
+}
+
+function getTransactionStatusLabel(status) {
+  if (status === "accepted") {
+    return "active";
+  }
+  if (status === "disputed") {
+    return "disputed";
+  }
+  if (status === "completed") {
+    return "completed";
+  }
+  return String(status || "-");
+}
+
+function summarizeAvailableActions(actions) {
+  if (!Array.isArray(actions) || actions.length === 0) {
+    return "none";
+  }
+  return actions.join(", ");
+}
+
+function renderTransactionInbox() {
+  const listNode = qs("#transaction-inbox-list");
+  listNode.innerHTML = "";
+
+  if (state.transactionInboxRows.length === 0) {
+    const item = document.createElement("li");
+    item.textContent = "No transactions found for this filter.";
+    listNode.appendChild(item);
+    return;
+  }
+
+  for (const row of state.transactionInboxRows) {
+    const item = document.createElement("li");
+    const summary = document.createElement("span");
+    const listingLabel = row.listingTitle || "Marketplace transaction";
+    const primaryLine = `${listingLabel} | ${toUsdLike(row.amountCents, row.currency)} | ${getTransactionStatusLabel(row.status)}`;
+    const secondaryLine =
+      `counterparty: ${row.counterpartyDisplayName} | dispute: ${row.hasOpenDispute ? "open" : "none"} | ratings: ${row.hasAnyRatings ? "present" : "none"} | actions: ${summarizeAvailableActions(row.availableActions)}`;
+    summary.textContent = `${primaryLine}\n${secondaryLine}`;
+    summary.style.whiteSpace = "pre-line";
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "Open";
+    button.addEventListener("click", async () => {
+      try {
+        await fetchTransaction(row.id);
+        setPanelStatus("#transaction-inbox-status-line", `Loaded ${row.id} from inbox.`);
+      } catch (error) {
+        setPanelStatus("#transaction-inbox-status-line", error.message, "error");
+        log(error.message, "error");
+      }
+    });
+
+    item.append(summary, button);
     listNode.appendChild(item);
   }
 }
@@ -806,6 +867,9 @@ async function fetchTransaction(transactionId) {
   } catch {
     // Keep transaction view usable even if trust payload is temporarily unavailable.
   }
+  void loadTransactionInbox().catch((error) => {
+    log(error.message, "error");
+  });
   log(`loaded transaction ${payload.transaction.id}`);
 }
 
@@ -834,6 +898,26 @@ async function fetchEvidence() {
   log(`loaded ${payload.evidence.length} evidence records`);
 }
 
+async function loadTransactionInbox() {
+  const status = qs("#transaction-inbox-status").value;
+  const search = new URLSearchParams();
+  search.set("limit", "20");
+  if (status) {
+    search.set("status", status);
+  }
+  const payload = await apiRequest("GET", `/transactions?${search.toString()}`);
+  state.transactionInboxRows = payload.transactions ?? [];
+  state.transactionInboxPaging = payload.paging ?? { limit: 20, nextCursor: null };
+  renderTransactionInbox();
+  const nextCursor = state.transactionInboxPaging?.nextCursor;
+  const cursorLabel = nextCursor ? `, next cursor at ${fmtDate(nextCursor.updatedAt)}` : "";
+  setPanelStatus(
+    "#transaction-inbox-status-line",
+    `Loaded ${state.transactionInboxRows.length} transaction row(s)${cursorLabel}.`
+  );
+  log(`loaded transaction inbox (${state.transactionInboxRows.length} rows, status=${status || "all"})`);
+}
+
 async function loadNotifications() {
   const payload = await apiRequest("GET", "/notifications");
   renderNotifications(payload.notifications);
@@ -858,6 +942,7 @@ function bindEvents() {
       qs("#auth-modal").close();
       log(`registered and signed in as ${payload.user.role}`);
       await refreshListings();
+      await loadTransactionInbox();
     } catch (error) {
       log(error.message, "error");
     }
@@ -878,6 +963,7 @@ function bindEvents() {
       qs("#auth-modal").close();
       log(`logged in as ${payload.user.role}`);
       await refreshListings();
+      await loadTransactionInbox();
     } catch (error) {
       log(error.message, "error");
     }
@@ -893,10 +979,13 @@ function bindEvents() {
     state.selectedListingReputation = null;
     state.selectedModerationListingId = null;
     state.selectedRiskTransactionId = null;
+    state.transactionInboxRows = [];
+    state.transactionInboxPaging = { limit: 20, nextCursor: null };
     renderRoleUI();
     renderTransactionSummary();
     renderTransactionTrust();
     renderRatingState();
+    renderTransactionInbox();
     renderListingReputation();
     renderEvents();
     renderEvidence();
@@ -939,6 +1028,15 @@ function bindEvents() {
     try {
       await refreshListings();
     } catch (error) {
+      log(error.message, "error");
+    }
+  });
+
+  qs("#load-transaction-inbox").addEventListener("click", async () => {
+    try {
+      await loadTransactionInbox();
+    } catch (error) {
+      setPanelStatus("#transaction-inbox-status-line", error.message, "error");
       log(error.message, "error");
     }
   });
@@ -1012,6 +1110,7 @@ function bindEvents() {
       renderTransactionSummary();
       renderTransactionTrust();
       renderRatingState();
+      await loadTransactionInbox();
       log(`created transaction ${payload.transaction.id}`);
     } catch (error) {
       log(error.message, "error");
@@ -1065,6 +1164,7 @@ function bindEvents() {
       renderTransactionTrust();
       renderRatingState();
       setPanelStatus("#closure-status-line", "Buyer completion confirmation submitted.");
+      await loadTransactionInbox();
       log("confirmed delivery");
     } catch (error) {
       setPanelStatus("#closure-status-line", error.message, "error");
@@ -1087,6 +1187,7 @@ function bindEvents() {
     renderTransactionTrust();
     renderRatingState();
     setPanelStatus("#closure-status-line", "Dispute opened. Closure is now blocked pending resolution.");
+    await loadTransactionInbox();
     log("opened dispute");
   }
 
@@ -1139,6 +1240,7 @@ function bindEvents() {
       state.currentTransaction = payload.transaction;
       renderTransactionSummary();
       setPanelStatus("#closure-status-line", "Seller completion acknowledgment recorded.");
+      await loadTransactionInbox();
       log("seller acknowledged completion");
     } catch (error) {
       setPanelStatus("#closure-status-line", error.message, "error");
@@ -1194,6 +1296,7 @@ function bindEvents() {
       renderTransactionSummary();
       renderTransactionTrust();
       renderRatingState();
+      await loadTransactionInbox();
       log("resolved dispute");
     } catch (error) {
       log(error.message, "error");
@@ -1226,6 +1329,7 @@ function bindEvents() {
       renderTransactionSummary();
       renderTransactionTrust();
       renderRatingState();
+      await loadTransactionInbox();
       if (payload.decisionTransparency) {
         log(
           `decision transparency: ${payload.decisionTransparency.policyReasonCategory} | appeal closes ${payload.decisionTransparency.appealWindow?.closesAt}`
@@ -1569,6 +1673,7 @@ function bindEvents() {
       renderTransactionTrust();
       renderRatingState();
       setPanelStatus("#rating-status-line", "Rating submitted.");
+      await loadTransactionInbox();
       form.comment.value = "";
       log(`submitted rating for ${transactionId}`);
     } catch (error) {
@@ -1588,6 +1693,7 @@ async function init() {
   renderRatingState();
   renderEvents();
   renderEvidence();
+  renderTransactionInbox();
   bindEvents();
 
   try {

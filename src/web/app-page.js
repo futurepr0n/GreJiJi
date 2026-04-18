@@ -129,6 +129,23 @@ export function renderWebAppPage() {
 
       <section class="panel role-buyer role-seller role-admin" id="transaction-panel" hidden>
         <h2>Transaction Workspace</h2>
+        <div class="card">
+          <h3>My Transactions</h3>
+          <div class="actions">
+            <label>Status
+              <select id="transaction-inbox-status">
+                <option value="">all</option>
+                <option value="accepted">accepted</option>
+                <option value="disputed">disputed</option>
+                <option value="completed">completed</option>
+              </select>
+            </label>
+            <button type="button" id="load-transaction-inbox">Refresh inbox</button>
+          </div>
+          <p class="status" id="transaction-inbox-status-line">Load your transaction inbox to select an active row.</p>
+          <ul id="transaction-inbox-list" class="list"></ul>
+        </div>
+
         <div class="grid three">
           <form id="purchase-form" class="card role-buyer" hidden>
             <h3>Buyer: purchase selected listing</h3>
