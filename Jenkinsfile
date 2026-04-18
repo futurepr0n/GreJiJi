@@ -12,6 +12,14 @@ pipeline {
     buildDiscarder(logRotator(numToKeepStr: '20'))
   }
 
+  parameters {
+    password(
+      name: 'AUTH_TOKEN_SECRET',
+      defaultValue: '',
+      description: 'Runtime auth token secret used by deploy validation gate.'
+    )
+  }
+
   environment {
     APP_NAME = 'grejiji-api'
     IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT?.take(7) ?: 'local'}"
@@ -20,6 +28,7 @@ pipeline {
     APP_SERVICE_NAME = "${env.APP_SERVICE_NAME ?: 'api'}"
     ALLOW_PORT_FALLBACK = "${env.ALLOW_PORT_FALLBACK ?: '1'}"
     ROLLBACK_SIMULATION_ENABLED = "${env.ROLLBACK_SIMULATION_ENABLED ?: 'true'}"
+    AUTH_TOKEN_SECRET = "${params.AUTH_TOKEN_SECRET ?: env.AUTH_TOKEN_SECRET ?: ''}"
   }
 
   stages {
