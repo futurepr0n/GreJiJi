@@ -1,7 +1,7 @@
 ---
 title: GreJiJi Operations Guide
 author: PaperclipAI Documentation Expert
-date: 2026-04-09
+date: 2026-04-18
 status: current
 ---
 
@@ -26,6 +26,76 @@ Primary local surfaces:
 - Health probe: `GET /health`
 - Readiness probe: `GET /ready`
 - Observability snapshot: `GET /metrics`
+
+Storage roots used by the current build:
+
+- SQLite DB: `DATABASE_PATH` (default `./data/grejiji.sqlite`)
+- Dispute evidence: `EVIDENCE_STORAGE_PATH` (default `./data/dispute-evidence`)
+- Listing photos: `LISTING_PHOTO_STORAGE_PATH` (default `./data/listing-photos`)
+
+> [!NOTE]
+> Listing photo uploads are stored on disk outside SQLite. Backups and restore drills need both the database file and the `listing-photos` directory to preserve listing media integrity.
+
+## Demo auth and seed dataset runbook
+
+Use this runbook for local walkthroughs of the auth modal and role-specific demo flows in `GET /app`.
+
+### Seed controls
+
+- `DEMO_SEED_ENABLED` defaults to `true` when `NODE_ENV` is not `test`
+- `DEMO_SEED_PASSWORD` defaults to `DemoMarket123!`
+- seeding only runs when `DATABASE_PATH` resolves to the default DB path (`./data/grejiji.sqlite`)
+- bootstrap is idempotent for users + history; seeded listings are refreshed on each run to match the current demo catalog
+
+### Seeded accounts
+
+- `demo-admin@grejiji.demo` (role `admin`)
+- `demo-buyer@grejiji.demo` (role `buyer`)
+- `demo-seller-01@grejiji.demo` ... `demo-seller-10@grejiji.demo` (role `seller`)
+- password: `DemoMarket123!` unless overridden via `DEMO_SEED_PASSWORD`
+
+### Seeded retro listing catalog
+
+The default seed catalog contains 10 active retro game listings (`demo-listing-01` through `demo-listing-10`) with two image URLs each (box art + gameplay snapshot):
+
+- Chrono Trigger (SNES) CIB
+- Donkey Kong Country (SNES)
+- F-Zero (SNES)
+- EarthBound (SNES) Cart
+- Final Fantasy III (SNES)
+- Pokemon Blue Version (Game Boy)
+- Tetris (Game Boy)
+- Kirby's Dream Land (Game Boy)
+- Golden Axe (Genesis)
+- Super Mario 64 (Nintendo 64)
+
+### Local walkthrough
+
+1. Start from a clean default local DB (optional but recommended for deterministic demos):
+
+```bash
+rm -f ./data/grejiji.sqlite
+```
+
+2. Start the service with demo seeding enabled:
+
+```bash
+DEMO_SEED_ENABLED=true npm start
+```
+
+3. Open the web console at `http://localhost:3000/app`.
+4. Use the header button `Sign in / Register` to open the auth modal, or use one-click quick-login in the `Demo Access` panel.
+5. Validate role-specific behavior:
+   - seller: create listing and upload photo
+   - buyer: browse seeded listings and confirm list thumbnails + listing-detail gallery images render inline
+   - buyer: create transaction and confirm delivery
+   - admin: inspect dispute queue, moderation, and risk controls
+
+> [!TIP]
+> Demo quick-login buttons only prefill the login form and open the modal. Submit the login form to authenticate and switch the UI into role-aware mode.
+
+> [!NOTE]
+> To refresh stale demo listing content in an existing default DB, restart the service with `DEMO_SEED_ENABLED=true`. Seed users and completed history remain stable while `demo-listing-*` entries are updated to the current retro catalog payload.
 
 ## Production launch runbook
 
@@ -62,6 +132,104 @@ Expected outcomes for each deploy command:
 - emits JSON events: `deploy.config.valid`, `migration.preflight.passed`, `synthetic.*`, and `deploy.succeeded`
 - on post-deploy smoke failure, executes configured rollback command, restores DB snapshot, reruns synthetic checks, and emits `deploy.rolled_back`
 
+### Jenkins pipeline provisioning runbook
+
+Use this when provisioning CI/CD in Jenkins instead of GitHub Actions-hosted deploy orchestration.
+
+1. Export required Jenkins API + repo settings:
+
+```bash
+export JENKINS_BASE_URL="https://ci.example.com"
+export JENKINS_USER="ci-user"
+export JENKINS_TOKEN="<api-token>"
+export JENKINS_REPO_URL="https://github.com/futurepr0n/GreJiJi"
+```
+
+2. Provision (or refresh) the pipeline job:
+
+```bash
+npm run jenkins:provision
+```
+
+3. Confirm script output includes one of:
+   - `Created job: GreJiJi`
+   - `Updated job: GreJiJi`
+   - `Triggered build: GreJiJi`
+
+4. Configure Jenkins deploy environment variables (Manage Jenkins -> System -> Global properties or per-job environment):
+   - `APP_HOST_PORT` (required host port binding, for example `3333`)
+   - `APP_CONTAINER_PORT` (defaults to `3000`)
+   - `APP_SERVICE_NAME` (defaults to `api`)
+   - `ALLOW_PORT_FALLBACK` (defaults to `1` in Jenkinsfile; when enabled, deploy script scans the next 50 host ports if `APP_HOST_PORT` is already occupied)
+   - `ROLLBACK_SIMULATION_ENABLED` (defaults to `true` in Jenkinsfile; controls whether the rollback simulation stage runs)
+   - `AUTH_TOKEN_SECRET` (required Jenkins runtime secret, must not be placeholder)
+     - Jenkinsfile defines this as a masked `password` build parameter
+     - runtime precedence is: build parameter `AUTH_TOKEN_SECRET` -> environment `AUTH_TOKEN_SECRET` -> empty string (validation failure)
+     - recommended setup: provide the value in `Build with Parameters`, or inject from Jenkins credentials to env before running deploy
+   - when `PAYMENT_PROVIDER=stripe`: `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` are required
+
+5. Deploy-stage verification behavior (`scripts/jenkins/deploy-docker.sh`):
+   - validates Jenkins context (`JENKINS_URL`, `JOB_NAME`, `BUILD_NUMBER`) and Docker Compose config
+   - validates host/container port values and blocks invalid port mappings before deploy
+   - verifies deployed container publishes the expected port binding
+   - probes `http://127.0.0.1:$APP_HOST_PORT/health` until healthy
+   - captures current container image as rollback tag and restores it automatically when deploy or health checks fail
+   - rollback tag derivation strips any existing tag from `APP_IMAGE_REF` before appending `:rollback-<build>` (fix tracked in [GREAA-136](/GREAA/issues/GREAA-136))
+   - concrete mapping example for tagged refs:
+     - old invalid output: `grejiji-api:local:rollback-123`
+     - current valid output: `grejiji-api:rollback-123`
+
+Build trigger notes for `AUTH_TOKEN_SECRET`:
+
+1. Open Jenkins job `GreJiJi` and select `Build with Parameters`.
+2. Enter a non-placeholder secret value for `AUTH_TOKEN_SECRET`.
+3. Start the build; Jenkins masks the parameter value in UI/log output.
+4. If the parameter is left empty, deploy falls back to environment `AUTH_TOKEN_SECRET`; if both are empty, deploy gate fails.
+
+6. Rollback simulation gate behavior (`Jenkinsfile` stage `Rollback Simulation Gate`):
+   - stage runs when `DEPLOY_ENABLED=true` and `ROLLBACK_SIMULATION_ENABLED=true`
+   - it intentionally forces a health-probe failure and expects deploy rollback to execute
+   - rollback health verification uses `ROLLBACK_HEALTHCHECK_PATH` (default `/health`) so rollback checks are not affected by the forced simulation probe
+   - expected success signal is a failed deploy command plus both rollback markers in logs:
+
+```bash
+set +e
+HEALTHCHECK_PATH="/__force_rollback_probe__" ./scripts/jenkins/deploy-docker.sh > rollback-simulation.log 2>&1
+status=$?
+set -e
+
+cat rollback-simulation.log
+test "$status" -ne 0
+grep -q "Attempting rollback to previous image" rollback-simulation.log
+grep -q "Rollback succeeded and service is healthy." rollback-simulation.log
+```
+
+Effective defaults used by `scripts/jenkins/provision-job.sh`:
+
+- `JENKINS_FOLDER` -> empty (root-level Jenkins job, no folder)
+- `JENKINS_JOB` -> `GreJiJi`
+- `JENKINS_BRANCH` -> `*/main`
+- `JENKINS_SCRIPT_PATH` -> `Jenkinsfile`
+- `JENKINS_GIT_CREDENTIALS_ID` -> empty
+
+Migration notes from legacy folder jobs (`GreJiJi/deploy`):
+
+- keep legacy folder structure:
+
+```bash
+JENKINS_FOLDER="GreJiJi" JENKINS_JOB="deploy" npm run jenkins:provision
+```
+
+- migrate to root-level default:
+
+```bash
+unset JENKINS_FOLDER
+JENKINS_JOB="GreJiJi" npm run jenkins:provision
+```
+
+> [!TIP]
+> The provisioning script is idempotent. Re-running it updates the job XML and retriggers a build, so it is safe to use after Jenkinsfile or branch/default changes.
+
 ### Rollback
 
 1. Trigger rollback explicitly when needed:
@@ -80,6 +248,14 @@ curl -sS http://localhost:3000/health
 curl -sS http://localhost:3000/ready
 ```
 
+Jenkins Docker rollback verification (on-host):
+
+```bash
+docker compose --env-file .env -f docker-compose.yml ps api
+docker compose --env-file .env -f docker-compose.yml logs --tail=200 api
+curl -sS -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:${APP_HOST_PORT}/health"
+```
+
 ### Incident triage
 
 1. Confirm probe state:
@@ -90,6 +266,7 @@ curl -sS http://localhost:3000/ready
    - `migration.preflight.*`: migration safety check failed
    - `synthetic.check.failed`: endpoint regression (health/auth/listing/transaction/dispute/webhook)
    - `deploy.failed` with `deploy.rolled_back`: rollout command or post-deploy checks failed, auto-rollback executed
+   - `[deploy-docker] ERROR: ...`: Jenkins Docker gate failure (env validation, port binding mismatch, health probe timeout, or rollback failure)
 3. Check structured logs (`stdout`) for `request.error` events with `requestId`.
 4. Check optional error sink:
 
@@ -119,6 +296,79 @@ curl -sS -H "x-correlation-id: incident-1234" http://localhost:3000/health
 ```bash
 curl -sS http://localhost:3000/metrics | jq '.counters[] | select(.name|test("^notification\\.dispatch"))'
 curl -sS http://localhost:3000/metrics | jq '.queue.notificationOutbox'
+```
+
+9. If listing images appear broken, verify photo storage separately from DB health:
+
+```bash
+find "${LISTING_PHOTO_STORAGE_PATH:-./data/listing-photos}" -maxdepth 2 -type f | head
+du -sh "${LISTING_PHOTO_STORAGE_PATH:-./data/listing-photos}"
+```
+
+Rollback-simulation specific triage and safe rerun:
+
+```bash
+# verify the simulation gate is enabled for this Jenkins build context
+echo "ROLLBACK_SIMULATION_ENABLED=${ROLLBACK_SIMULATION_ENABLED:-true}"
+echo "ALLOW_PORT_FALLBACK=${ALLOW_PORT_FALLBACK:-1}"
+
+# run the same simulation locally/on Jenkins executor with explicit defaults
+ALLOW_PORT_FALLBACK="${ALLOW_PORT_FALLBACK:-1}" \
+ROLLBACK_SIMULATION_ENABLED="${ROLLBACK_SIMULATION_ENABLED:-true}" \
+HEALTHCHECK_PATH="/__force_rollback_probe__" \
+bash ./scripts/jenkins/deploy-docker.sh 2>&1 | tee /tmp/grejiji-rollback-simulation.log
+
+# required rollback-proof markers
+grep -F "Attempting rollback to previous image" /tmp/grejiji-rollback-simulation.log
+grep -F "Rollback succeeded and service is healthy." /tmp/grejiji-rollback-simulation.log
+```
+
+- Optional override for rollback health path (defaults to `/health`):
+
+```bash
+ROLLBACK_HEALTHCHECK_PATH="/health" \
+HEALTHCHECK_PATH="/__force_rollback_probe__" \
+bash ./scripts/jenkins/deploy-docker.sh 2>&1 | tee /tmp/grejiji-rollback-simulation.log
+```
+
+- If the simulation must be bypassed temporarily to unblock an urgent deploy, set `ROLLBACK_SIMULATION_ENABLED=false` for that run and capture justification in the build notes.
+- To rerun safely, prefer `ALLOW_PORT_FALLBACK=1`; if disabled, set a free `APP_HOST_PORT` explicitly before retrying.
+
+Jenkins deploy-docker triage commands (run on the Jenkins executor/host in repo root):
+
+```bash
+set -o pipefail
+bash -x ./scripts/jenkins/deploy-docker.sh 2>&1 | tee /tmp/grejiji-deploy-docker.log
+docker compose --env-file .env -f docker-compose.yml ps
+docker compose --env-file .env -f docker-compose.yml logs --tail=200 "${APP_SERVICE_NAME:-api}"
+grep -F "[deploy-docker] ERROR:" /tmp/grejiji-deploy-docker.log
+```
+
+Exact failure signatures emitted by `scripts/jenkins/deploy-docker.sh`:
+
+- `APP_HOST_PORT must be explicitly set.`
+- `APP_HOST_PORT must be a valid port (1-65535).`
+- `APP_CONTAINER_PORT must be a valid port (1-65535).`
+- `JENKINS_URL is required for Jenkins deploy jobs.`
+- `JOB_NAME is required for Jenkins deploy jobs.`
+- `BUILD_NUMBER is required for Jenkins deploy jobs.`
+- `Required credential '<KEY>' is missing or uses a placeholder value.`
+- `STRIPE_SECRET_KEY is required when PAYMENT_PROVIDER=stripe.`
+- `STRIPE_WEBHOOK_SECRET is required when PAYMENT_PROVIDER=stripe.`
+- `Host port <PORT> is already in use. Set APP_HOST_PORT or enable ALLOW_PORT_FALLBACK=1.`
+- `Container <CONTAINER_ID> does not publish <APP_CONTAINER_PORT>/tcp.`
+- `Expected host port <APP_HOST_PORT>, got '<published-port>'.`
+- `Rollback requested but no previous image reference is available.`
+- `Rollback failed: service container is not running.`
+- `Rollback completed but service failed health checks.`
+- `Deployment failed and rollback was applied.`
+- `Deployment failed: port verification failed; rollback was applied.`
+- `Deployment failed: health verification failed; rollback was applied.`
+
+10. Confirm listing API payloads still expose both image surfaces:
+
+```bash
+curl -sS http://localhost:3000/listings | jq '.listings[] | {id, photoUrls, uploadedPhotos}'
 ```
 
 ### Dispute operations checks
@@ -156,7 +406,7 @@ Use the in-browser admin console for launch-day operations when you need audited
 3. Listing moderation workflow:
    - open **Admin Listing Moderation**
    - load queue by status (`pending_review`, `temporarily_hidden`, `rejected`, `approved`)
-   - open listing detail to review moderation timeline and abuse reports
+   - open listing detail to review moderation timeline, abuse reports, external `photoUrls`, and uploaded image links
    - apply `approve`, `reject`, `hide`, or `unhide` with reason/public reason/operator notes
 4. High-risk transaction interventions:
    - open **Admin Risk Interventions**
@@ -229,6 +479,28 @@ Use the in-browser admin console for launch-day operations when you need audited
    - participant retries `POST /transactions/:transactionId/confirm-delivery`
    - verify terminal state via `GET /transactions/:transactionId`
 
+### Listing photo verification workflow
+
+Use this after deploys that touch listing creation, moderation, storage paths, or the seller console.
+
+1. Create a seller listing with external image URLs:
+   - `POST /listings` with `photoUrls`
+2. Upload at least one binary image:
+   - `POST /listings/:listingId/photos`
+   - body must be JSON with `fileName`, `mimeType`, and `contentBase64`
+3. Confirm the returned payload includes:
+   - `listing.photoUrls`
+   - `listing.uploadedPhotos[]`
+   - `photo.downloadUrl`
+4. Validate read-path behavior:
+   - approved listing: anonymous `GET /listings/:listingId/photos/:photoId` should return bytes
+   - non-approved listing: only the seller or an admin should be able to fetch the uploaded file
+5. Check on-disk persistence:
+
+```bash
+find "${LISTING_PHOTO_STORAGE_PATH:-./data/listing-photos}/<listing-id>" -maxdepth 1 -type f
+```
+
 ### Trust-operations v6 queue workflow
 
 1. Run continuous policy sweep (admin):
@@ -251,7 +523,7 @@ Use the in-browser admin console for launch-day operations when you need audited
    - override recommendation: `POST /admin/trust-operations/cases/:caseId/override`
    - clear and resolve case: `POST /admin/trust-operations/cases/:caseId/clear`
    - intervention preview (v10): `GET /admin/trust-operations/cases/:caseId/intervention-preview`
-   - evidence export (v10): `POST /admin/trust-operations/cases/:caseId/evidence-bundle/export`
+   - evidence export (v17 bundle): `POST /admin/trust-operations/cases/:caseId/evidence-bundle/export`
    - bulk actions with audit fan-out: `POST /admin/trust-operations/cases/bulk-action`
 6. Capture tuning feedback and validate telemetry:
    - feedback ingestion: `POST /admin/trust-operations/feedback`
@@ -332,13 +604,59 @@ Use the in-browser admin console for launch-day operations when you need audited
    - `GET /admin/trust-operations/cases/:caseId/intervention-preview`
 4. Export case evidence bundle for audit/review handoff:
    - `POST /admin/trust-operations/cases/:caseId/evidence-bundle/export`
-   - confirm payload includes `decisionBoundary`, forensics signals, and remediation timeline
+   - confirm payload includes `contextBundles.assessment|intervention|dispute` plus `integrityMetadata.bundleHashSha256` and `checkpointLinkage`
 5. Execute false-positive unwind and rollback validation:
    - `POST /admin/trust-operations/cases/:caseId/clear` with `reasonCode=false_positive_after_review`
    - verify remediation actions move to `rolled_back` and unwind actions are appended immutably
 6. Track v10 telemetry:
    - `GET /admin/trust-operations/dashboard`
    - confirm `metrics.interdictionV10` (rollback rate, action counts, authenticity signal score)
+
+### Trust-operations v17 evidence-bundle export verification
+
+Use this flow when an operator needs a handoff-grade export for incident review, legal escalation, or external forensic retention.
+
+1. Export the case bundle:
+
+```bash
+curl -sS -X POST http://localhost:3000/admin/trust-operations/cases/<case-id>/evidence-bundle/export \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "requireDisputeArtifacts": true,
+    "expectedBundleHashSha256": "<known-bundle-hash>",
+    "artifactHashAssertions": [
+      {
+        "artifactType": "dispute_evidence",
+        "artifactId": "42",
+        "expectedHashSha256": "<expected-artifact-hash>"
+      }
+    ]
+  }'
+```
+
+2. Validate the three bundle checkpoints in the response:
+   - `contextBundles.assessment`: collusion links, listing-authenticity signals, buyer-risk signals, and policy simulation outcomes
+   - `contextBundles.intervention`: case rationale, machine/human decision boundary, remediation actions, and dispute-preemption actions
+   - `contextBundles.dispute`: escrow attestation checkpoints, dispute evidence, fulfillment proofs, and risk-checkpoint decisions
+3. Validate integrity metadata before sharing the export:
+   - compare `integrityMetadata.bundleHashSha256` with the operator's expected hash when doing deterministic re-export checks
+   - inspect `integrityMetadata.artifactHashes` and `checkpointLinkage` to confirm every exported artifact is represented at the intended checkpoint
+   - confirm `assertionsChecked` matches the number of hash assertions sent in the request
+
+> [!WARNING]
+> `requireDisputeArtifacts=true` fails with `409` when both dispute evidence and fulfillment proofs are absent. Treat that as a workflow stop, not a soft warning.
+
+> [!TIP]
+> Use `expectedBundleHashSha256` for replay-safe handoffs and `artifactHashAssertions` for selective spot checks when only a subset of evidence artifacts is externally anchored.
+
+4. Triage conflict responses:
+   - `409 missing dispute artifacts`: gather/upload dispute evidence or fulfillment proof before retrying export
+   - `409 integrity verification failed: bundle hash mismatch`: the exported checkpoint set drifted from the caller's expected snapshot; re-evaluate case mutations before handoff
+   - `409 integrity verification failed: artifact not found|hash mismatch`: the asserted artifact set is stale or tampered; review case evidence inventory and retry only after reconciliation
+5. Record the exported bundle alongside the case review:
+   - retain `caseId`, `transactionId`, `exportVersion`, `exportedAt`, and `integrityMetadata.bundleHashSha256`
+   - if the export is attached to an incident timeline, include which of `assessment`, `intervention`, or `dispute` was relied on for the operator decision
 
 ### Listing moderation workflow and launch safety SLA
 

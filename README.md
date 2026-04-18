@@ -38,6 +38,7 @@ Default local URLs:
 - `AUTH_TOKEN_TTL_SECONDS` defaults to `43200`
 - `EVIDENCE_STORAGE_PATH` defaults to `./data/dispute-evidence`
 - `EVIDENCE_MAX_BYTES` defaults to `5242880` (5 MB)
+- `LISTING_PHOTO_STORAGE_PATH` defaults to `./data/listing-photos`
 - `LISTING_PHOTO_MAX_BYTES` defaults to `8388608` (8 MB)
 - `REQUEST_BODY_MAX_BYTES` defaults to `1048576` (1 MB JSON payload limit)
 - `SERVICE_FEE_FIXED_CENTS` defaults to `0` (flat platform fee in cents)
@@ -60,6 +61,8 @@ Default local URLs:
 - `RATE_LIMIT_ADMIN_JOBS_MAX` defaults to `30` per IP/window
 - `REQUEST_LOG_ENABLED` defaults to `true` (JSON structured access logs)
 - `ERROR_EVENT_LOG_FILE` optional JSONL sink for server error events
+- `DEMO_SEED_ENABLED` defaults to `true` outside `NODE_ENV=test` and only applies when using default `DATABASE_PATH` (idempotent demo users/history bootstrap + listing refresh on reseed)
+- `DEMO_SEED_PASSWORD` defaults to `DemoMarket123!` (shared password for seeded demo accounts)
 
 ## Core capabilities
 
@@ -174,15 +177,76 @@ Required environment variables for automated deploy:
 - `STAGING_BASE_URL`, `STAGING_DATABASE_PATH`, `STAGING_AUTH_TOKEN_SECRET`, `STAGING_STRIPE_WEBHOOK_SECRET`, `STAGING_DEPLOY_COMMAND`, `STAGING_ROLLBACK_COMMAND`
 - `PRODUCTION_BASE_URL`, `PRODUCTION_DATABASE_PATH`, `PRODUCTION_AUTH_TOKEN_SECRET`, `PRODUCTION_STRIPE_WEBHOOK_SECRET`, `PRODUCTION_DEPLOY_COMMAND`, `PRODUCTION_ROLLBACK_COMMAND`
 
+### Jenkins pipeline provisioning (root-level default)
+
+Provision or refresh the Jenkins pipeline job:
+
+```bash
+JENKINS_BASE_URL="https://ci.example.com" \
+JENKINS_USER="ci-user" \
+JENKINS_TOKEN="<api-token>" \
+JENKINS_REPO_URL="https://github.com/futurepr0n/GreJiJi" \
+npm run jenkins:provision
+```
+
+`scripts/jenkins/provision-job.sh` defaults:
+
+- `JENKINS_FOLDER` defaults to empty (no folder, root-level job)
+- `JENKINS_JOB` defaults to `GreJiJi`
+- `JENKINS_BRANCH` defaults to `*/main`
+- `JENKINS_SCRIPT_PATH` defaults to `Jenkinsfile`
+- `JENKINS_GIT_CREDENTIALS_ID` defaults to empty (no credentials id in SCM block)
+
+Migration note from legacy folder job layout (`GreJiJi/deploy`):
+
+- keep legacy layout: set `JENKINS_FOLDER="GreJiJi"` and `JENKINS_JOB="deploy"`
+- migrate to root-level default: unset `JENKINS_FOLDER` and keep `JENKINS_JOB="GreJiJi"`
+- the provisioning script is idempotent: it creates missing folder/job resources, updates existing job config, then triggers a build
+
+Jenkins deploy-stage hardening variables:
+
+- `APP_HOST_PORT` required (example `3333`)
+- `APP_CONTAINER_PORT` optional (default `3000`)
+- `APP_SERVICE_NAME` optional (default `api`)
+- `ALLOW_PORT_FALLBACK` optional in deploy script (`0`/`1`), Jenkinsfile default is `1`
+- `ROLLBACK_SIMULATION_ENABLED` optional Jenkins gate toggle, default `true`
+- `AUTH_TOKEN_SECRET` required Jenkins runtime secret and must not use placeholder values
+  - Jenkinsfile defines this as a masked `password` build parameter (`Build with Parameters`)
+  - runtime precedence is: build parameter `AUTH_TOKEN_SECRET` -> environment `AUTH_TOKEN_SECRET` -> empty string (validation failure)
+  - recommended setup: enter the value per build in `Build with Parameters`, or inject it from Jenkins credentials into the build environment
+- when `PAYMENT_PROVIDER=stripe`: `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` are required
+
+`scripts/jenkins/deploy-docker.sh` now enforces:
+
+- pre-deploy env validation (Jenkins runtime vars, ports, credentials)
+- Docker Compose validation gate before deploy
+- post-deploy checks for container port binding + `GET /health`
+- automatic rollback to the previous image if deploy or health verification fails
+
+Jenkinsfile rollback simulation gate (`Rollback Simulation Gate` stage):
+
+- runs after deploy when `ROLLBACK_SIMULATION_ENABLED=true`
+- executes deploy script with forced failing health path (`HEALTHCHECK_PATH=/__force_rollback_probe__`)
+- rollback verification still probes a safe path (`ROLLBACK_HEALTHCHECK_PATH`, default `/health`) so rollback health checks are isolated from the simulated failure path
+- requires both log markers for pass: `Attempting rollback to previous image` and `Rollback succeeded and service is healthy.`
+
 ## Frontend workflow
 
 The responsive web console at `GET /app` is API-backed and role-aware:
 
-- Auth forms for register/login (`buyer`, `seller`, `admin`).
-- Buyer flow: browse listings, create purchase transaction, confirm delivery, open dispute, upload evidence.
-- Seller flow: create listings, inspect transactions, open dispute, upload evidence.
+- Auth opens from header navigation as a modal (register/login for `buyer`, `seller`, `admin`).
+- Demo quick-login buttons are prefilled for seeded accounts:
+  - `demo-seller-01@grejiji.demo`
+  - `demo-buyer@grejiji.demo`
+  - `demo-admin@grejiji.demo`
+  - password: `DemoMarket123!` (or `DEMO_SEED_PASSWORD`)
+- Buyer flow: browse listings with external and uploaded photos, create purchase transaction, confirm delivery, open dispute, upload evidence.
+- Seller flow: create listings with dollar-form inputs, attach external `photoUrls`, upload image files to existing listings, inspect transactions, open dispute, upload evidence.
 - Admin flow: load dispute queue/detail, resolve/adjudicate disputes, inspect evidence and events.
 - Shared flow: view settlement breakdown fields (`itemPrice`, `serviceFee`, `totalBuyerCharge`, `sellerNet`, `currency`) and inbox notifications.
+- Demo seed catalog now provisions 10 retro game listings (`demo-listing-01` through `demo-listing-10`) with two validated image URLs per listing (box art + gameplay snapshot).
+- Listing browse renders image thumbnails inline, and listing detail renders a combined gallery from both external `photoUrls` and uploaded listing photos.
+- Restarting with demo seeding enabled updates existing `demo-listing-*` records to the current catalog definition instead of keeping stale generic seed content.
 
 No separate frontend build step is required. Server routes:
 

@@ -1,7 +1,7 @@
 ---
 title: GreJiJi API Reference
 author: PaperclipAI Documentation Expert
-date: 2026-04-09
+date: 2026-04-18
 status: current
 ---
 
@@ -35,6 +35,9 @@ GreJiJi is a Node.js + SQLite backend for local marketplace escrow, disputes, an
 | `AUTH_TOKEN_TTL_SECONDS` | `43200` | Token lifetime in seconds |
 | `EVIDENCE_STORAGE_PATH` | `./data/dispute-evidence` | Local dispute evidence file root |
 | `EVIDENCE_MAX_BYTES` | `5242880` | Max upload size (bytes) per evidence file |
+| `LISTING_PHOTO_STORAGE_PATH` | `./data/listing-photos` | Local file root for uploaded listing photos |
+| `DEMO_SEED_ENABLED` | `true` outside `NODE_ENV=test` | Enables idempotent demo user/listing/history bootstrap on startup (default DB path only) |
+| `DEMO_SEED_PASSWORD` | `DemoMarket123!` | Shared password assigned to all demo accounts when seeding runs |
 | `REQUEST_BODY_MAX_BYTES` | `1048576` | Max JSON request payload size in bytes |
 | `SERVICE_FEE_FIXED_CENTS` | `0` | Flat platform fee applied per transaction (cents) |
 | `SERVICE_FEE_PERCENT` | `0` | Additional percent platform fee (supports decimals like `2.5`) |
@@ -389,7 +392,66 @@ Admin-only trust-operations case actions. All actions require `reasonCode` and a
 #### `POST /admin/trust-operations/cases/:caseId/cluster-apply`
 
 Admin-only investigator workflow and bulk-action APIs with required `reasonCode` enforcement and per-case immutable audit fan-out.
-Evidence-bundle export returns v10 case forensics payloads, intervention rationale, remediation timeline, and decision-boundary context.
+
+Evidence-bundle export returns a v17 incident package with top-level `payload.contextBundles` split into three operator-facing checkpoints:
+
+| Context bundle | Includes |
+| --- | --- |
+| `assessment` | `collusionSignals`, `listingAuthenticitySignals`, `buyerRiskSignals`, `policySimulationOutcomes` |
+| `intervention` | intervention `rationale`, machine/human `decisionBoundary`, `remediationActions`, `disputePreemptionActions` |
+| `dispute` | `escrowAttestationCheckpoints`, `disputeEvidence`, `fulfillmentProofs`, and `riskCheckpointDecisions` for `transactionInitiation` + `payoutRelease` |
+
+The export also appends deterministic `integrityMetadata` with `bundleHashSha256`, `artifactHashes`, `checkpointLinkage`, and `assertionsChecked`.
+
+Request body:
+
+```json
+{
+  "requireDisputeArtifacts": true,
+  "expectedBundleHashSha256": "8d6b0d8f6d83c03f1dfc6dd0f0a3bc3d4cb347f3c5ef0b4f7ef97c7fd1c1ef10",
+  "artifactHashAssertions": [
+    {
+      "artifactType": "dispute_evidence",
+      "artifactId": "42",
+      "expectedHashSha256": "0b7b0b0f4d4f44f31efc7cb1d4d68ca7c7c8390f45db5f7d8c1d3e9f9e2f12ab"
+    }
+  ]
+}
+```
+
+Optional strict-integrity request fields:
+
+- `requireDisputeArtifacts` (`boolean`): returns `409` when both `disputeEvidence` and `fulfillmentProofs` are empty.
+- `expectedBundleHashSha256` (`string`): returns `409` when the computed bundle hash for `{ exportVersion, caseId, transactionId, policyVersionId, contextBundles }` does not match.
+- `artifactHashAssertions` (`array`): returns `409` when any `{ artifactType, artifactId, expectedHashSha256 }` assertion references a missing artifact or a mismatched hash.
+
+> [!WARNING]
+> Integrity failures on this route are conflict responses, not partial successes. A `409` means the bundle should be treated as unverified and excluded from downstream incident handoff.
+
+Successful response shape:
+
+```json
+{
+  "caseId": 17,
+  "payload": {
+    "exportVersion": "v17",
+    "exportedAt": "2026-04-11T00:00:00.000Z",
+    "exportedBy": "admin-user-id",
+    "transactionId": 204,
+    "contextBundles": {
+      "assessment": {},
+      "intervention": {},
+      "dispute": {}
+    },
+    "integrityMetadata": {
+      "bundleHashSha256": "8d6b0d8f6d83c03f1dfc6dd0f0a3bc3d4cb347f3c5ef0b4f7ef97c7fd1c1ef10",
+      "checkpointLinkage": [],
+      "artifactHashes": [],
+      "assertionsChecked": 1
+    }
+  }
+}
+```
 
 #### `POST /admin/trust-operations/simulate-policy`
 
@@ -571,6 +633,7 @@ Validation:
 - `localArea` required
 - `priceCents` must be a positive integer
 - `photoUrls` is optional; when present it must be an array of `http`/`https` URLs (max `12`)
+- duplicate `photoUrls` entries are collapsed after normalization
 - policy checks on create/update can auto-assign moderation states:
   - `approved`
   - `pending_review` (metadata incomplete or price anomaly)
@@ -587,9 +650,18 @@ Listing payloads also include:
 - `photoUrls`: external image links attached by seller
 - `uploadedPhotos`: uploaded image metadata (`id`, `originalFileName`, `mimeType`, `sizeBytes`, `checksumSha256`, `downloadUrl`, `createdAt`)
 
+Photo field behavior:
+
+- omit `photoUrls` in `PATCH` to preserve the existing external photo list
+- send `photoUrls: []` in `PATCH` to clear all external photo links
+- uploaded photos are append-only through `POST /listings/:listingId/photos`
+
 #### `POST /listings/:listingId/photos`
 
 Seller-only, and only the owning seller may upload listing photos.
+
+> [!NOTE]
+> This endpoint accepts JSON with base64-encoded file content. It is not a multipart upload route.
 
 Request body:
 
@@ -598,19 +670,57 @@ Request body:
   "photoId": "photo-1",
   "fileName": "bike-front.png",
   "mimeType": "image/png",
-  "contentBase64": "iVBORw0KGgoAAAANSUhEUgAA..."
+  "contentBase64": "iVBORw0KGgoAAAANSUhEUgAA...",
+  "checksumSha256": "optional-hex-checksum"
 }
 ```
 
 Constraints:
 
 - `mimeType` must be one of `image/jpeg`, `image/png`, `image/webp`, `image/gif`
+- `fileName` is required and must be `<= 255` characters
 - file size must be `<= LISTING_PHOTO_MAX_BYTES` (default `8388608`)
 - optional `checksumSha256` is verified against uploaded content
+
+Success response shape:
+
+```json
+{
+  "listing": {
+    "id": "listing-1",
+    "uploadedPhotos": [
+      {
+        "id": "photo-1",
+        "originalFileName": "bike-front.png",
+        "mimeType": "image/png",
+        "sizeBytes": 12345,
+        "checksumSha256": "abc123...",
+        "downloadUrl": "/listings/listing-1/photos/photo-1",
+        "createdAt": "2026-04-11T20:00:00.000Z"
+      }
+    ]
+  },
+  "photo": {
+    "id": "photo-1",
+    "originalFileName": "bike-front.png",
+    "mimeType": "image/png",
+    "sizeBytes": 12345,
+    "checksumSha256": "abc123...",
+    "downloadUrl": "/listings/listing-1/photos/photo-1",
+    "createdAt": "2026-04-11T20:00:00.000Z"
+  }
+}
+```
 
 #### `GET /listings/:listingId/photos/:photoId`
 
 Returns the uploaded photo bytes. Public for approved listings; sellers/admins can also view non-approved listing photos.
+
+Operational semantics:
+
+- returns the stored file bytes with the original upload MIME type
+- returns `403` when the listing is not publicly viewable and the caller is neither the owning seller nor an admin
+- returns `404` when the listing, photo metadata, or file on disk is missing
 
 #### `POST /listings/:listingId/abuse-reports`
 
@@ -959,7 +1069,8 @@ The app also ships a lightweight browser console for operational walkthroughs an
 
 Capabilities exposed by the current UI:
 
-- register and login for `buyer`, `seller`, and `admin`
+- auth opens from header navigation via a modal (register + login for `buyer`, `seller`, and `admin`)
+- one-click demo-login buttons prefill auth form credentials
 - browse listings and create seller-owned listings
 - create and inspect transactions
 - confirm delivery or open disputes as a participant
@@ -969,6 +1080,52 @@ Capabilities exposed by the current UI:
 
 > [!TIP]
 > No frontend build step is required. The server returns the HTML shell and static browser assets directly from `/app`, `/app/client.js`, and `/app/styles.css`.
+
+### Demo seed behavior and local usage
+
+Seeding conditions in the current build:
+
+- `DEMO_SEED_ENABLED` resolves to `true` by default except when `NODE_ENV=test`
+- demo seeding only runs when `DATABASE_PATH` resolves to the built-in default (`./data/grejiji.sqlite`)
+- startup seeding is idempotent for users/history; re-running the server refreshes existing `demo-listing-*` records to the current catalog values
+
+Seeded demo identities:
+
+- `demo-admin@grejiji.demo` (`admin`)
+- `demo-buyer@grejiji.demo` (`buyer`)
+- `demo-seller-01@grejiji.demo` through `demo-seller-10@grejiji.demo` (`seller`)
+- shared password: `DemoMarket123!` (override with `DEMO_SEED_PASSWORD`)
+
+Seeded retro listing catalog (`demo-listing-01` through `demo-listing-10`):
+
+- Chrono Trigger (SNES) CIB
+- Donkey Kong Country (SNES)
+- F-Zero (SNES)
+- EarthBound (SNES) Cart
+- Final Fantasy III (SNES)
+- Pokemon Blue Version (Game Boy)
+- Tetris (Game Boy)
+- Kirby's Dream Land (Game Boy)
+- Golden Axe (Genesis)
+- Super Mario 64 (Nintendo 64)
+
+Listing rendering behavior in `GET /app`:
+
+- listing browse uses the first available listing photo as an inline thumbnail
+- listing detail renders an inline gallery sourced from both external `photoUrls` and uploaded listing photos
+- photo URLs remain available as clickable links below the gallery for direct inspection
+
+Quick local walkthrough:
+
+```bash
+rm -f ./data/grejiji.sqlite
+DEMO_SEED_ENABLED=true npm start
+# open http://localhost:3000/app
+# click "Login as Seller", "Login as Buyer", or "Login as Admin"
+```
+
+> [!WARNING]
+> If you point `DATABASE_PATH` at a non-default path, demo bootstrap will not run unless that path equals the server's default database location. This prevents accidental seeding in custom environments.
 
 > [!WARNING]
 > Auto-release skips transactions with an unresolved dispute. A dispute must be resolved or adjudicated before settlement can progress.

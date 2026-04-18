@@ -188,7 +188,7 @@ export function renderDocsPage() {
           This service documents its own auth, listing, escrow, dispute, settlement, and audit behavior.
           Use this page as the live companion to the repo docs.
         </p>
-        <div class="card-row" aria-label="Service summary">
+          <div class="card-row" aria-label="Service summary">
           <div class="metric">
             <strong>Node 18+</strong>
             <span>Runtime target</span>
@@ -202,8 +202,8 @@ export function renderDocsPage() {
             <span>Signed HMAC tokens</span>
           </div>
           <div class="metric">
-            <strong>Trust ops v16</strong>
-            <span>Containment, stress controls, canary governance</span>
+            <strong>Trust ops v17</strong>
+            <span>Incident bundles, integrity proofs, operator handoff</span>
           </div>
         </div>
       </header>
@@ -214,9 +214,10 @@ export function renderDocsPage() {
           <ol>
             <li><a href="#overview">Overview</a></li>
             <li><a href="#auth">Auth and roles</a></li>
+            <li><a href="#demo">Demo mode</a></li>
             <li><a href="#routes">Route map</a></li>
             <li><a href="#workflow">Settlement workflow</a></li>
-            <li><a href="#trust">Trust operations v16</a></li>
+            <li><a href="#trust">Trust operations v17</a></li>
             <li><a href="#audit">Audit trail and notifications</a></li>
             <li><a href="#operations">Operations</a></li>
           </ol>
@@ -279,11 +280,47 @@ export function renderDocsPage() {
 }</code></pre>
           </section>
 
+          <section id="demo" aria-labelledby="demo-title">
+            <h2 id="demo-title">Demo mode</h2>
+            <p>
+              The web console auth flow uses a modal opened from the header action, plus one-click demo account buttons
+              that prefill login credentials for seller, buyer, and admin walkthroughs.
+            </p>
+            <details open>
+              <summary>Seed behavior</summary>
+              <ul>
+                <li><code>DEMO_SEED_ENABLED</code> defaults to <code>true</code> unless <code>NODE_ENV=test</code>.</li>
+                <li>Seed bootstrap runs only when <code>DATABASE_PATH</code> resolves to <code>./data/grejiji.sqlite</code>.</li>
+                <li>Seeding is idempotent for users/history; existing <code>demo-listing-*</code> rows are refreshed to the current catalog on restart.</li>
+                <li>Catalog includes 10 retro game listings with two validated image URLs each (box art + gameplay).</li>
+              </ul>
+            </details>
+            <details>
+              <summary>Seeded credentials</summary>
+              <ul>
+                <li><code>demo-admin@grejiji.demo</code></li>
+                <li><code>demo-buyer@grejiji.demo</code></li>
+                <li><code>demo-seller-01@grejiji.demo</code> (plus seller 02 through 10)</li>
+                <li>Password: <code>DemoMarket123!</code> (override with <code>DEMO_SEED_PASSWORD</code>)</li>
+              </ul>
+            </details>
+            <pre><code>rm -f ./data/grejiji.sqlite
+DEMO_SEED_ENABLED=true npm start
+# open /app and click a Demo Access button
+</code></pre>
+            <div class="callout" role="note" aria-label="Demo mode note">
+              Demo buttons prefill and open the auth modal; submit the login form to complete authentication.
+            </div>
+          </section>
+
           <section id="routes" aria-labelledby="routes-title">
             <h2 id="routes-title">Route map</h2>
             <details open>
               <summary>Listings</summary>
-              <p><code>GET /listings</code> is public. Listing creation and updates are seller-only and validate <code>title</code>, <code>localArea</code>, and a positive integer <code>priceCents</code>. Listings support external <code>photoUrls</code> and uploaded photos via <code>POST /listings/:id/photos</code>.</p>
+              <p><code>GET /listings</code> is public. Listing creation and updates are seller-only and validate <code>title</code>, <code>localArea</code>, and a positive integer <code>priceCents</code>. Listings support external <code>photoUrls</code> plus uploaded seller images via <code>POST /listings/:listingId/photos</code>.</p>
+              <p>In <code>GET /app</code>, listing browse rows render the first available listing photo as a thumbnail, and listing detail renders a combined inline gallery from both external links and uploaded photo assets.</p>
+              <p>Photo uploads use JSON with <code>fileName</code>, <code>mimeType</code>, and base64 <code>contentBase64</code>. Allowed MIME types are <code>image/jpeg</code>, <code>image/png</code>, <code>image/webp</code>, and <code>image/gif</code>; max size is controlled by <code>LISTING_PHOTO_MAX_BYTES</code>.</p>
+              <p>Uploaded photo bytes are publicly readable only when the listing is approved. Sellers and admins can still fetch uploaded files for non-approved listings.</p>
             </details>
             <details>
               <summary>Transactions</summary>
@@ -295,7 +332,7 @@ export function renderDocsPage() {
             </details>
             <details>
               <summary>Trust assessments</summary>
-              <p><code>GET /transactions/:id/trust</code> returns the latest assessment and intervention history. <code>POST /transactions/:id/trust/evaluate</code> is admin-only and appends a fresh v16 evaluation snapshot.</p>
+              <p><code>GET /transactions/:id/trust</code> returns the latest assessment and intervention history. <code>POST /transactions/:id/trust/evaluate</code> is admin-only and appends a fresh trust evaluation snapshot, while <code>POST /admin/trust-operations/cases/:caseId/evidence-bundle/export</code> emits the current v17 handoff bundle.</p>
             </details>
             <details>
               <summary>Notification dispatch and inbox</summary>
@@ -318,25 +355,25 @@ export function renderDocsPage() {
           </section>
 
           <section id="trust" aria-labelledby="trust-title">
-            <h2 id="trust-title">Trust operations v16</h2>
+            <h2 id="trust-title">Trust operations v17</h2>
             <p>
-              The current trust engine persists <code>trust-ops-v16</code> assessments with linked-entity containment,
-              settlement stress scenarios, and canary rollout governance.
+              The current trust engine persists operator review state plus a v17 evidence-bundle export surface for
+              deterministic incident handoff, checkpoint-level verification, and downstream audit retention.
             </p>
             <details open>
-              <summary>Account takeover containment</summary>
-              <p>Correlates shared device and payment-fingerprint transitions, then returns a <code>containmentBand</code>, <code>containmentMode</code>, and investigator evidence trail before operators freeze linked accounts.</p>
+              <summary>Assessment bundle</summary>
+              <p><code>contextBundles.assessment</code> packages collusion links, listing-authenticity signals, buyer-risk signals, and policy simulation outcomes into the operator's read-first checkpoint.</p>
             </details>
             <details>
-              <summary>Settlement risk stress controls</summary>
-              <p>Simulates delayed delivery, reversal waves, and coordinated dispute bursts. Operators should inspect <code>maxScenarioSeverity</code> and <code>recommendedControls</code> before releasing high-risk funds.</p>
+              <summary>Intervention bundle</summary>
+              <p><code>contextBundles.intervention</code> captures rationale, machine/human decision boundaries, remediation actions, and dispute-preemption actions so reviewers can reconstruct why a case moved into containment.</p>
             </details>
             <details>
-              <summary>Policy canary governance</summary>
-              <p>Uses degradation pressure and rollback thresholds to choose <code>promote</code>, <code>hold</code>, or <code>revert</code>, with guarded cohort stages of 5%, 20%, and 100%.</p>
+              <summary>Dispute bundle and integrity verification</summary>
+              <p><code>contextBundles.dispute</code> includes escrow attestation checkpoints, dispute evidence, fulfillment proofs, and risk checkpoint decisions. Operators can require artifacts, assert known hashes, and validate the response through <code>integrityMetadata.bundleHashSha256</code>, <code>artifactHashes</code>, and <code>checkpointLinkage</code>.</p>
             </details>
             <div class="callout" role="note" aria-label="Trust route note">
-              Deep-dive route: <code>GET /transactions/:id/trust</code> returns both the latest assessment and historical interventions for audit review.
+              Deep-dive routes: <code>GET /transactions/:id/trust</code> returns the latest assessment history, and <code>POST /admin/trust-operations/cases/:caseId/evidence-bundle/export</code> produces the current v17 review bundle.
             </div>
           </section>
 
@@ -355,15 +392,27 @@ export function renderDocsPage() {
           <section id="operations" aria-labelledby="operations-title">
             <h2 id="operations-title">Operations</h2>
             <p>Run the service locally with <code>npm start</code> and verify behavior with <code>npm test</code>.</p>
+            <p>For Jenkins-based Docker delivery, provision or refresh the pipeline job with <code>npm run jenkins:provision</code> after setting Jenkins API credentials and repository settings.</p>
+            <p>Jenkins provisioning defaults to a root-level <code>GreJiJi</code> job when <code>JENKINS_FOLDER</code> is unset. Legacy <code>GreJiJi/deploy</code> setups remain supported by setting <code>JENKINS_FOLDER=GreJiJi</code> and <code>JENKINS_JOB=deploy</code>.</p>
             <div class="callout" role="note" aria-label="Operations note">
-              When trust rollout is under review, treat <code>policyCanaryGovernance.rolloutDecision = revert</code> as the canonical rollback signal and inspect the related intervention history before resuming rollout.
+              For incident handoff, treat a <code>409</code> evidence-bundle export response as an integrity failure. Resolve missing artifacts or hash drift before distributing the bundle downstream.
             </div>
             <pre><code>curl -sS -X POST http://localhost:3000/jobs/notification-dispatch \
   -H "Authorization: Bearer &lt;admin-token&gt;" \
   -H "Content-Type: application/json" \
   -d '{"limit":100}'
+JENKINS_BASE_URL="https://ci.example.com" \
+JENKINS_USER="ci-user" \
+JENKINS_TOKEN="&lt;api-token&gt;" \
+JENKINS_REPO_URL="https://github.com/futurepr0n/GreJiJi" \
+npm run jenkins:provision
+JENKINS_FOLDER="GreJiJi" JENKINS_JOB="deploy" npm run jenkins:provision
 curl -sS http://localhost:3000/transactions/&lt;transaction-id&gt;/trust \
   -H "Authorization: Bearer &lt;participant-or-admin-token&gt;"
+curl -sS -X POST http://localhost:3000/admin/trust-operations/cases/&lt;case-id&gt;/evidence-bundle/export \
+  -H "Authorization: Bearer &lt;admin-token&gt;" \
+  -H "Content-Type: application/json" \
+  -d '{"requireDisputeArtifacts":true}'
 sqlite3 ./data/grejiji.sqlite "SELECT id, transaction_id, topic, status, attempt_count, next_retry_at FROM notification_outbox ORDER BY id;"
 sqlite3 ./data/grejiji.sqlite "SELECT transaction_id, orchestration_version, json_extract(policy_canary_governance_json, '$.rolloutDecision') FROM trust_assessments ORDER BY updated_at DESC;"
 sqlite3 ./data/grejiji.sqlite "SELECT id, recipient_user_id, topic, status, read_at, acknowledged_at FROM user_notifications ORDER BY id;"</code></pre>
