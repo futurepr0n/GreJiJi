@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 
+import { fileURLToPath } from "node:url";
+
+const DEFAULT_REQUIRED_SECRET_KEY = "AUTH_TOKEN_SECRET";
+
 function parseArgs(argv) {
   const args = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -30,6 +34,94 @@ function xmlEscape(value) {
     .replaceAll("'", '&apos;');
 }
 
+function buildAuthTokenSecretParameterXml() {
+  return `    <hudson.model.ParametersDefinitionProperty>
+      <parameterDefinitions>
+        <hudson.model.PasswordParameterDefinition>
+          <name>${xmlEscape(DEFAULT_REQUIRED_SECRET_KEY)}</name>
+          <description>${xmlEscape("Runtime auth token secret used by deploy validation gate.")}</description>
+          <defaultValue></defaultValue>
+          <trim>false</trim>
+        </hudson.model.PasswordParameterDefinition>
+      </parameterDefinitions>
+    </hudson.model.ParametersDefinitionProperty>`;
+}
+
+export function buildJobXml({ repoUrl, credentialsId, branch, scriptPath }) {
+  return `<?xml version='1.1' encoding='UTF-8'?>
+<flow-definition plugin="workflow-job">
+  <actions/>
+  <description>GreJiJi CI/CD pipeline using Docker deployment.</description>
+  <keepDependencies>false</keepDependencies>
+  <properties>
+${buildAuthTokenSecretParameterXml()}
+  </properties>
+  <definition class="org.jenkinsci.plugins.workflow.cps.CpsScmFlowDefinition" plugin="workflow-cps">
+    <scm class="hudson.plugins.git.GitSCM" plugin="git">
+      <configVersion>2</configVersion>
+      <userRemoteConfigs>
+        <hudson.plugins.git.UserRemoteConfig>
+          <url>${xmlEscape(repoUrl)}</url>
+          <credentialsId>${xmlEscape(credentialsId)}</credentialsId>
+        </hudson.plugins.git.UserRemoteConfig>
+      </userRemoteConfigs>
+      <branches>
+        <hudson.plugins.git.BranchSpec>
+          <name>${xmlEscape(branch)}</name>
+        </hudson.plugins.git.BranchSpec>
+      </branches>
+      <doGenerateSubmoduleConfigurations>false</doGenerateSubmoduleConfigurations>
+      <submoduleCfg class="empty-list"/>
+      <extensions/>
+    </scm>
+    <scriptPath>${xmlEscape(scriptPath)}</scriptPath>
+    <lightweight>true</lightweight>
+  </definition>
+  <triggers>
+    <hudson.triggers.SCMTrigger>
+      <spec>H/5 * * * *</spec>
+      <ignorePostCommitHooks>false</ignorePostCommitHooks>
+    </hudson.triggers.SCMTrigger>
+  </triggers>
+  <disabled>false</disabled>
+</flow-definition>`;
+}
+
+export function resolveBuildTriggerPlan({ triggerBuild = "auto", authTokenSecret = "" }) {
+  const mode = String(triggerBuild).trim().toLowerCase();
+  if (!["auto", "always", "never"].includes(mode)) {
+    throw new Error("Invalid --trigger-build value. Expected one of: auto, always, never.");
+  }
+
+  const secret = String(authTokenSecret).trim();
+  if (mode === "never") {
+    return { shouldTrigger: false, useParameters: false, mode, reason: "Build trigger explicitly disabled." };
+  }
+  if (secret) {
+    return {
+      shouldTrigger: true,
+      useParameters: true,
+      mode,
+      reason: "Build will be triggered with AUTH_TOKEN_SECRET parameter."
+    };
+  }
+  if (mode === "always") {
+    return {
+      shouldTrigger: true,
+      useParameters: false,
+      mode,
+      reason: "Build will be triggered without parameters; secret must come from Jenkins credentials/environment."
+    };
+  }
+  return {
+    shouldTrigger: false,
+    useParameters: false,
+    mode,
+    reason:
+      "Build trigger skipped because AUTH_TOKEN_SECRET was not provided and --trigger-build=auto. Set Jenkins credential or pass --auth-token-secret, then run the job."
+  };
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 
@@ -42,6 +134,8 @@ async function main() {
   const folder = String(args.folder ?? '').trim();
   const job = String(args.job ?? (folder ? 'deploy' : 'GreJiJi')).trim();
   const scriptPath = String(args['script-path'] ?? 'Jenkinsfile');
+  const authTokenSecret = String(args['auth-token-secret'] ?? '').trim();
+  const triggerBuild = String(args['trigger-build'] ?? 'auto');
 
   const authHeader = `Basic ${Buffer.from(`${user}:${token}`).toString('base64')}`;
 
@@ -122,41 +216,7 @@ async function main() {
   const jobApiPath = `${jobRootPath}/api/json`;
   const jobExists = await exists(jobApiPath);
 
-  const jobXml = `<?xml version='1.1' encoding='UTF-8'?>
-<flow-definition plugin="workflow-job">
-  <actions/>
-  <description>GreJiJi CI/CD pipeline using Docker deployment.</description>
-  <keepDependencies>false</keepDependencies>
-  <properties/>
-  <definition class="org.jenkinsci.plugins.workflow.cps.CpsScmFlowDefinition" plugin="workflow-cps">
-    <scm class="hudson.plugins.git.GitSCM" plugin="git">
-      <configVersion>2</configVersion>
-      <userRemoteConfigs>
-        <hudson.plugins.git.UserRemoteConfig>
-          <url>${xmlEscape(repoUrl)}</url>
-          <credentialsId>${xmlEscape(credentialsId)}</credentialsId>
-        </hudson.plugins.git.UserRemoteConfig>
-      </userRemoteConfigs>
-      <branches>
-        <hudson.plugins.git.BranchSpec>
-          <name>${xmlEscape(branch)}</name>
-        </hudson.plugins.git.BranchSpec>
-      </branches>
-      <doGenerateSubmoduleConfigurations>false</doGenerateSubmoduleConfigurations>
-      <submoduleCfg class="empty-list"/>
-      <extensions/>
-    </scm>
-    <scriptPath>${xmlEscape(scriptPath)}</scriptPath>
-    <lightweight>true</lightweight>
-  </definition>
-  <triggers>
-    <hudson.triggers.SCMTrigger>
-      <spec>H/5 * * * *</spec>
-      <ignorePostCommitHooks>false</ignorePostCommitHooks>
-    </hudson.triggers.SCMTrigger>
-  </triggers>
-  <disabled>false</disabled>
-</flow-definition>`;
+  const jobXml = buildJobXml({ repoUrl, credentialsId, branch, scriptPath });
 
   if (jobExists) {
     await call(`${jobRootPath}/config.xml`, {
@@ -183,17 +243,40 @@ async function main() {
     console.log(`Created job: ${folder ? `${folder}/${job}` : job}`);
   }
 
-  await call(`${jobRootPath}/build`, {
-    method: 'POST',
-    headers: {
-      ...crumbHeader
-    }
+  const buildPlan = resolveBuildTriggerPlan({
+    triggerBuild,
+    authTokenSecret
   });
+  console.log(`Build trigger policy: ${buildPlan.reason}`);
 
-  console.log(`Triggered build: ${folder ? `${folder}/${job}` : job}`);
+  if (buildPlan.shouldTrigger) {
+    if (buildPlan.useParameters) {
+      const params = new URLSearchParams({ [DEFAULT_REQUIRED_SECRET_KEY]: authTokenSecret });
+      await call(`${jobRootPath}/buildWithParameters`, {
+        method: 'POST',
+        headers: {
+          ...crumbHeader,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: params.toString()
+      });
+      console.log(`Triggered parameterized build: ${folder ? `${folder}/${job}` : job}`);
+    } else {
+      await call(`${jobRootPath}/build`, {
+        method: 'POST',
+        headers: {
+          ...crumbHeader
+        }
+      });
+      console.log(`Triggered build: ${folder ? `${folder}/${job}` : job}`);
+    }
+  }
 }
 
-main().catch((error) => {
-  console.error(error.message);
-  process.exit(1);
-});
+const isMainModule = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+if (isMainModule) {
+  main().catch((error) => {
+    console.error(error.message);
+    process.exit(1);
+  });
+}

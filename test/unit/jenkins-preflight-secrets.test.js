@@ -32,7 +32,7 @@ test("preflight fails when AUTH_TOKEN_SECRET is missing", () => {
   });
 
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /Missing required deploy secrets: AUTH_TOKEN_SECRET/i);
+  assert.match(result.stderr, /missing values: AUTH_TOKEN_SECRET/i);
   assert.doesNotMatch(result.stderr, /test-secret|local-dev-secret-change-me/i);
 });
 
@@ -51,6 +51,6 @@ test("preflight fails when AUTH_TOKEN_SECRET uses local development placeholder"
   });
 
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /Missing required deploy secrets: AUTH_TOKEN_SECRET/i);
+  assert.match(result.stderr, /placeholder values: AUTH_TOKEN_SECRET/i);
   assert.match(result.stderr, /set non-placeholder Jenkins password parameters/i);
 });

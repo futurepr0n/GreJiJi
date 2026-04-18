@@ -75,12 +75,6 @@ read_config_value() {
   env_file_value "$key"
 }
 
-is_placeholder_secret() {
-  local value
-  value="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
-  [[ -z "$value" || "$value" == "change-me" || "$value" == "your-secret" ]]
-}
-
 is_valid_health_scheme() {
   [[ "$1" =~ ^https?$ ]]
 }
@@ -180,7 +174,7 @@ validate_context() {
   for key in "${credential_keys[@]}"; do
     [[ -z "$key" ]] && continue
     value="$(read_config_value "$key")"
-    if is_placeholder_secret "$value"; then
+    if is_placeholder_deploy_secret_value "$value"; then
       fail "Required credential '$key' is missing or uses a placeholder value."
     fi
   done
@@ -189,8 +183,8 @@ validate_context() {
   if [[ "$payment_provider" == "stripe" ]]; then
     stripe_secret="$(read_config_value "STRIPE_SECRET_KEY")"
     stripe_webhook_secret="$(read_config_value "STRIPE_WEBHOOK_SECRET")"
-    is_placeholder_secret "$stripe_secret" && fail "STRIPE_SECRET_KEY is required when PAYMENT_PROVIDER=stripe."
-    is_placeholder_secret "$stripe_webhook_secret" && fail "STRIPE_WEBHOOK_SECRET is required when PAYMENT_PROVIDER=stripe."
+    is_placeholder_deploy_secret_value "$stripe_secret" && fail "STRIPE_SECRET_KEY is required when PAYMENT_PROVIDER=stripe."
+    is_placeholder_deploy_secret_value "$stripe_webhook_secret" && fail "STRIPE_WEBHOOK_SECRET is required when PAYMENT_PROVIDER=stripe."
   fi
 
   local rollback_healthcheck_path="/health"

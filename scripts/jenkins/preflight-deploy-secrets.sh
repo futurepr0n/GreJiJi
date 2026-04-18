@@ -45,16 +45,11 @@ read_config_value() {
   env_file_value "$key"
 }
 
-is_placeholder_secret() {
-  local value
-  value="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
-  [[ -z "$value" || "$value" == "change-me" || "$value" == "your-secret" || "$value" == "local-dev-secret-change-me" ]]
-}
-
 main() {
   local required_keys_csv="${REQUIRED_CREDENTIAL_KEYS:-$(deploy_required_secret_keys_csv)}"
   local credential_keys=()
   local missing_keys=()
+  local placeholder_keys=()
 
   IFS=', ' read -r -a credential_keys <<< "$required_keys_csv"
 
@@ -62,13 +57,24 @@ main() {
     [[ -z "$key" ]] && continue
     local value=""
     value="$(read_config_value "$key")"
-    if is_placeholder_secret "$value"; then
+    if [[ -z "$value" ]]; then
       missing_keys+=("$key")
+      continue
+    fi
+    if is_placeholder_deploy_secret_value "$value"; then
+      placeholder_keys+=("$key")
     fi
   done
 
-  if [[ "${#missing_keys[@]}" -gt 0 ]]; then
-    fail "Missing required deploy secrets: ${missing_keys[*]}. Remediation: set non-placeholder Jenkins password parameters or environment credentials for these exact keys (for example AUTH_TOKEN_SECRET) before Deploy Docker."
+  if [[ "${#missing_keys[@]}" -gt 0 || "${#placeholder_keys[@]}" -gt 0 ]]; then
+    local diagnostics=()
+    if [[ "${#missing_keys[@]}" -gt 0 ]]; then
+      diagnostics+=("missing values: ${missing_keys[*]}")
+    fi
+    if [[ "${#placeholder_keys[@]}" -gt 0 ]]; then
+      diagnostics+=("placeholder values: ${placeholder_keys[*]}")
+    fi
+    fail "Deploy secret preflight failed (${diagnostics[*]}). Remediation: set non-placeholder Jenkins password parameters or environment credentials for these exact keys (for example AUTH_TOKEN_SECRET) before Deploy Docker."
   fi
 
   log "Required deploy secrets present: ${credential_keys[*]}"
