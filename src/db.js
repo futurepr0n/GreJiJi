@@ -11,6 +11,11 @@ const VALID_ADJUDICATION_DECISIONS = new Set([
   "refund_to_buyer",
   "cancel_transaction"
 ]);
+const VALID_DISPUTE_CASE_STATUSES = new Set(["open", "under_review", "resolved", "rejected"]);
+const VALID_DISPUTE_CASE_TRANSITIONS = new Map([
+  ["open", new Set(["under_review"])],
+  ["under_review", new Set(["resolved", "rejected"])]
+]);
 const VALID_EVENT_TYPES = new Set([
   "payment_captured",
   "buyer_confirmed",
@@ -526,6 +531,43 @@ function mapDisputeEvidence(row) {
     sizeBytes: row.size_bytes,
     checksumSha256: row.checksum_sha256,
     storageKey: row.storage_key,
+    note: row.note ?? null,
+    attachmentRefs: parseJsonArrayOrEmpty(row.attachment_refs_json),
+    createdAt: row.created_at
+  };
+}
+
+function mapDisputeCase(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    transactionId: row.transaction_id,
+    status: row.status,
+    assignedOperatorId: row.assigned_operator_id ?? null,
+    resolutionNote: row.resolution_note ?? null,
+    openedByActorId: row.opened_by_actor_id ?? null,
+    openedAt: row.opened_at,
+    resolvedAt: row.resolved_at ?? null,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapDisputeCaseTimelineEntry(row) {
+  if (!row) {
+    return null;
+  }
+  return {
+    id: Number(row.id),
+    transactionId: row.transaction_id,
+    eventType: row.event_type,
+    actorId: row.actor_id,
+    fromStatus: row.from_status ?? null,
+    toStatus: row.to_status ?? null,
+    note: row.note ?? null,
+    attachmentRefs: parseJsonArrayOrEmpty(row.attachment_refs_json),
+    metadata: parseJsonOrEmpty(row.metadata_json),
     createdAt: row.created_at
   };
 }
@@ -1643,6 +1685,8 @@ export function createTransactionStore({
       size_bytes,
       checksum_sha256,
       storage_key,
+      note,
+      attachment_refs_json,
       created_at
     ) VALUES (
       @id,
@@ -1653,6 +1697,8 @@ export function createTransactionStore({
       @size_bytes,
       @checksum_sha256,
       @storage_key,
+      @note,
+      @attachment_refs_json,
       @created_at
     )
   `);
@@ -1719,6 +1765,69 @@ export function createTransactionStore({
     FROM dispute_evidence_integrity
     WHERE transaction_id = @transaction_id
     ORDER BY updated_at DESC, evidence_id DESC
+    LIMIT @limit
+  `);
+  const getDisputeCaseByTransactionId = db.prepare(`
+    SELECT *
+    FROM dispute_cases
+    WHERE transaction_id = @transaction_id
+    LIMIT 1
+  `);
+  const upsertDisputeCase = db.prepare(`
+    INSERT INTO dispute_cases (
+      transaction_id,
+      status,
+      assigned_operator_id,
+      resolution_note,
+      opened_by_actor_id,
+      opened_at,
+      resolved_at,
+      updated_at
+    ) VALUES (
+      @transaction_id,
+      @status,
+      @assigned_operator_id,
+      @resolution_note,
+      @opened_by_actor_id,
+      @opened_at,
+      @resolved_at,
+      @updated_at
+    )
+    ON CONFLICT(transaction_id) DO UPDATE SET
+      status = excluded.status,
+      assigned_operator_id = excluded.assigned_operator_id,
+      resolution_note = excluded.resolution_note,
+      resolved_at = excluded.resolved_at,
+      updated_at = excluded.updated_at
+  `);
+  const insertDisputeCaseTimeline = db.prepare(`
+    INSERT INTO dispute_case_timeline (
+      transaction_id,
+      event_type,
+      actor_id,
+      from_status,
+      to_status,
+      note,
+      attachment_refs_json,
+      metadata_json,
+      created_at
+    ) VALUES (
+      @transaction_id,
+      @event_type,
+      @actor_id,
+      @from_status,
+      @to_status,
+      @note,
+      @attachment_refs_json,
+      @metadata_json,
+      @created_at
+    )
+  `);
+  const listDisputeCaseTimelineByTransaction = db.prepare(`
+    SELECT *
+    FROM dispute_case_timeline
+    WHERE transaction_id = @transaction_id
+    ORDER BY created_at ASC, id ASC
     LIMIT @limit
   `);
   const insertFulfillmentProof = db.prepare(`
@@ -3938,6 +4047,65 @@ export function createTransactionStore({
     });
 
     return Number(result.lastInsertRowid);
+  }
+
+  function appendDisputeCaseTimeline({
+    transactionId,
+    eventType,
+    actorId,
+    fromStatus = null,
+    toStatus = null,
+    note = null,
+    attachmentRefs = [],
+    metadata = {},
+    createdAt = null
+  }) {
+    const normalizedActorId = String(actorId ?? "").trim();
+    if (!normalizedActorId) {
+      throw new StoreError("validation", "actorId is required for dispute timeline events");
+    }
+    const timestamp = createdAt ?? now().toISOString();
+    insertDisputeCaseTimeline.run({
+      transaction_id: transactionId,
+      event_type: String(eventType ?? "").trim() || "note_added",
+      actor_id: normalizedActorId,
+      from_status: fromStatus,
+      to_status: toStatus,
+      note: note ? String(note).trim() : null,
+      attachment_refs_json: JSON.stringify(Array.isArray(attachmentRefs) ? attachmentRefs : []),
+      metadata_json: JSON.stringify(metadata ?? {}),
+      created_at: timestamp
+    });
+  }
+
+  function ensureDisputeCase(transaction, { openedByActorId = null, createdAt = null } = {}) {
+    const existing = mapDisputeCase(
+      getDisputeCaseByTransactionId.get({ transaction_id: transaction.id })
+    );
+    if (existing) {
+      return existing;
+    }
+    const timestamp = createdAt ?? now().toISOString();
+    const actorId = String(openedByActorId ?? transaction.buyerId ?? "system").trim();
+    upsertDisputeCase.run({
+      transaction_id: transaction.id,
+      status: "open",
+      assigned_operator_id: null,
+      resolution_note: null,
+      opened_by_actor_id: actorId,
+      opened_at: timestamp,
+      resolved_at: null,
+      updated_at: timestamp
+    });
+    appendDisputeCaseTimeline({
+      transactionId: transaction.id,
+      eventType: "dispute_opened",
+      actorId,
+      fromStatus: null,
+      toStatus: "open",
+      metadata: {}
+    });
+    return mapDisputeCase(getDisputeCaseByTransactionId.get({ transaction_id: transaction.id }));
   }
 
   function enqueueOutboxRecords({ transactionId, sourceEventId, occurredAt, records }) {
@@ -11437,6 +11605,8 @@ export function createTransactionStore({
       sizeBytes,
       checksumSha256,
       storageKey,
+      note = null,
+      attachmentRefs = [],
       integrity = {}
     }) {
       if (!id || !transactionId || !uploaderUserId) {
@@ -11467,6 +11637,9 @@ export function createTransactionStore({
       }
 
       const timestamp = now().toISOString();
+      const normalizedNote =
+        note === null || note === undefined ? null : String(note).trim() || null;
+      const normalizedAttachmentRefs = Array.isArray(attachmentRefs) ? attachmentRefs : [];
 
       try {
         insertDisputeEvidence.run({
@@ -11478,6 +11651,8 @@ export function createTransactionStore({
           size_bytes: sizeBytes,
           checksum_sha256: checksumSha256.trim(),
           storage_key: storageKey.trim(),
+          note: normalizedNote,
+          attachment_refs_json: JSON.stringify(normalizedAttachmentRefs),
           created_at: timestamp
         });
       } catch (error) {
@@ -11508,6 +11683,21 @@ export function createTransactionStore({
       });
 
       const evidence = mapDisputeEvidence(getDisputeEvidenceById.get(id));
+      appendDisputeCaseTimeline({
+        transactionId,
+        eventType: "evidence_added",
+        actorId: uploaderUserId,
+        fromStatus: null,
+        toStatus: null,
+        note: normalizedNote,
+        attachmentRefs: normalizedAttachmentRefs,
+        metadata: {
+          evidenceId: id,
+          fileName: originalFileName.trim(),
+          mimeType: mimeType.trim()
+        },
+        createdAt: timestamp
+      });
       return {
         ...evidence,
         integrity: mapDisputeEvidenceIntegrity(
@@ -11573,6 +11763,182 @@ export function createTransactionStore({
           getDisputeEvidenceIntegrityByEvidenceId.get({ evidence_id: evidence.id })
         )
       };
+    },
+
+    getDisputeCase({ transactionId }) {
+      const transaction = mapTransaction(getTransactionByIdQuery.get(transactionId));
+      if (!transaction) {
+        throw new StoreError("not_found", "transaction not found");
+      }
+      const disputeCase = ensureDisputeCase(transaction, {
+        openedByActorId: transaction.buyerId,
+        createdAt: transaction.disputeOpenedAt ?? now().toISOString()
+      });
+      return disputeCase;
+    },
+
+    listDisputeTimeline({ transactionId, limit = 500 }) {
+      const transaction = mapTransaction(getTransactionByIdQuery.get(transactionId));
+      if (!transaction) {
+        throw new StoreError("not_found", "transaction not found");
+      }
+      if (!Number.isInteger(limit) || limit <= 0 || limit > 2000) {
+        throw new StoreError("validation", "limit must be an integer between 1 and 2000");
+      }
+      ensureDisputeCase(transaction, {
+        openedByActorId: transaction.buyerId,
+        createdAt: transaction.disputeOpenedAt ?? now().toISOString()
+      });
+      return listDisputeCaseTimelineByTransaction
+        .all({ transaction_id: transactionId, limit })
+        .map(mapDisputeCaseTimelineEntry);
+    },
+
+    addDisputeNote({ transactionId, actorId, note, attachmentRefs = [] }) {
+      const transaction = mapTransaction(getTransactionByIdQuery.get(transactionId));
+      if (!transaction) {
+        throw new StoreError("not_found", "transaction not found");
+      }
+      if (transaction.status !== "disputed") {
+        throw new StoreError("conflict", "dispute notes can only be added to open disputes");
+      }
+      const normalizedActorId = String(actorId ?? "").trim();
+      if (!normalizedActorId) {
+        throw new StoreError("validation", "actorId is required");
+      }
+      const normalizedNote = String(note ?? "").trim();
+      if (!normalizedNote) {
+        throw new StoreError("validation", "note is required");
+      }
+      const normalizedAttachmentRefs = Array.isArray(attachmentRefs) ? attachmentRefs : [];
+      ensureDisputeCase(transaction, {
+        openedByActorId: transaction.buyerId,
+        createdAt: transaction.disputeOpenedAt ?? now().toISOString()
+      });
+      const timestamp = now().toISOString();
+      appendDisputeCaseTimeline({
+        transactionId,
+        eventType: "note_added",
+        actorId: normalizedActorId,
+        note: normalizedNote,
+        attachmentRefs: normalizedAttachmentRefs,
+        metadata: {},
+        createdAt: timestamp
+      });
+      const rows = listDisputeCaseTimelineByTransaction
+        .all({ transaction_id: transactionId, limit: 2000 })
+        .map(mapDisputeCaseTimelineEntry);
+      return rows.at(-1) ?? null;
+    },
+
+    claimDisputeCase({ transactionId, operatorId, note = null }) {
+      const transaction = mapTransaction(getTransactionByIdQuery.get(transactionId));
+      if (!transaction) {
+        throw new StoreError("not_found", "transaction not found");
+      }
+      if (transaction.status !== "disputed") {
+        throw new StoreError("conflict", "can only claim disputes that are currently open");
+      }
+      const normalizedOperatorId = String(operatorId ?? "").trim();
+      if (!normalizedOperatorId) {
+        throw new StoreError("validation", "operatorId is required");
+      }
+      const normalizedNote = note === null || note === undefined ? null : String(note).trim() || null;
+      const timestamp = now().toISOString();
+      const disputeCase = ensureDisputeCase(transaction, {
+        openedByActorId: transaction.buyerId,
+        createdAt: transaction.disputeOpenedAt ?? timestamp
+      });
+      if (disputeCase.assignedOperatorId && disputeCase.assignedOperatorId !== normalizedOperatorId) {
+        throw new StoreError("conflict", "dispute is already assigned to another operator");
+      }
+      const nextStatus = disputeCase.status === "open" ? "under_review" : disputeCase.status;
+      upsertDisputeCase.run({
+        transaction_id: transactionId,
+        status: nextStatus,
+        assigned_operator_id: normalizedOperatorId,
+        resolution_note: disputeCase.resolutionNote,
+        opened_by_actor_id: disputeCase.openedByActorId,
+        opened_at: disputeCase.openedAt,
+        resolved_at: disputeCase.resolvedAt,
+        updated_at: timestamp
+      });
+      appendDisputeCaseTimeline({
+        transactionId,
+        eventType: "claimed",
+        actorId: normalizedOperatorId,
+        fromStatus: disputeCase.status,
+        toStatus: nextStatus,
+        note: normalizedNote,
+        metadata: {},
+        createdAt: timestamp
+      });
+      return mapDisputeCase(getDisputeCaseByTransactionId.get({ transaction_id: transactionId }));
+    },
+
+    transitionDisputeCase({ transactionId, actorId, toStatus, resolutionNote = null }) {
+      const transaction = mapTransaction(getTransactionByIdQuery.get(transactionId));
+      if (!transaction) {
+        throw new StoreError("not_found", "transaction not found");
+      }
+      const normalizedActorId = String(actorId ?? "").trim();
+      if (!normalizedActorId) {
+        throw new StoreError("validation", "actorId is required");
+      }
+      const normalizedToStatus = String(toStatus ?? "").trim();
+      if (!VALID_DISPUTE_CASE_STATUSES.has(normalizedToStatus)) {
+        throw new StoreError(
+          "validation",
+          "toStatus must be one of: open, under_review, resolved, rejected"
+        );
+      }
+      const timestamp = now().toISOString();
+      const disputeCase = ensureDisputeCase(transaction, {
+        openedByActorId: transaction.buyerId,
+        createdAt: transaction.disputeOpenedAt ?? timestamp
+      });
+      if (disputeCase.status === normalizedToStatus) {
+        return disputeCase;
+      }
+      const allowed = VALID_DISPUTE_CASE_TRANSITIONS.get(disputeCase.status);
+      if (!allowed || !allowed.has(normalizedToStatus)) {
+        throw new StoreError(
+          "conflict",
+          `invalid dispute transition from ${disputeCase.status} to ${normalizedToStatus}`
+        );
+      }
+      const normalizedResolutionNote =
+        resolutionNote === null || resolutionNote === undefined
+          ? null
+          : String(resolutionNote).trim() || null;
+      if (
+        (normalizedToStatus === "resolved" || normalizedToStatus === "rejected") &&
+        !normalizedResolutionNote
+      ) {
+        throw new StoreError("validation", "resolutionNote is required for resolved or rejected status");
+      }
+      upsertDisputeCase.run({
+        transaction_id: transactionId,
+        status: normalizedToStatus,
+        assigned_operator_id: disputeCase.assignedOperatorId,
+        resolution_note: normalizedResolutionNote,
+        opened_by_actor_id: disputeCase.openedByActorId,
+        opened_at: disputeCase.openedAt,
+        resolved_at:
+          normalizedToStatus === "resolved" || normalizedToStatus === "rejected" ? timestamp : null,
+        updated_at: timestamp
+      });
+      appendDisputeCaseTimeline({
+        transactionId,
+        eventType: "status_changed",
+        actorId: normalizedActorId,
+        fromStatus: disputeCase.status,
+        toStatus: normalizedToStatus,
+        note: normalizedResolutionNote,
+        metadata: {},
+        createdAt: timestamp
+      });
+      return mapDisputeCase(getDisputeCaseByTransactionId.get({ transaction_id: transactionId }));
     },
 
     recordFulfillmentProof({
@@ -12063,6 +12429,7 @@ export function createTransactionStore({
       }
 
       if (existing.status === "disputed" && !existing.dispute_resolved_at) {
+        ensureDisputeCase(mapTransaction(existing), { openedByActorId: actorId });
         return mapTransaction(existing);
       }
 
@@ -12091,6 +12458,10 @@ export function createTransactionStore({
           actorId,
           occurredAt: timestamp,
           payload: {}
+        });
+        ensureDisputeCase(mapTransaction(getTransactionByIdQuery.get(id)), {
+          openedByActorId: actorId,
+          createdAt: timestamp
         });
         const recipientUserId = actorId === existing.buyer_id ? existing.seller_id : existing.buyer_id;
         enqueueOutboxRecords({
@@ -12122,7 +12493,7 @@ export function createTransactionStore({
       return mapTransaction(getTransactionByIdQuery.get(id));
     },
 
-    resolveDispute({ id }) {
+    resolveDispute({ id, actorId = "admin", resolutionNote = null }) {
       const existing = getTransactionByIdQuery.get(id);
       if (!existing) {
         throw new StoreError("not_found", "transaction not found");
@@ -12136,6 +12507,11 @@ export function createTransactionStore({
       }
 
       const timestamp = now().toISOString();
+      const normalizedActorId = String(actorId ?? "").trim() || "admin";
+      const normalizedResolutionNote =
+        resolutionNote === null || resolutionNote === undefined
+          ? null
+          : String(resolutionNote).trim() || null;
       const runResolveDispute = db.transaction(() => {
         const result = resolveDisputeStatement.run({
           id,
@@ -12150,9 +12526,33 @@ export function createTransactionStore({
         const sourceEventId = appendTransactionEvent({
           transactionId: id,
           eventType: "dispute_resolved",
-          actorId: "admin",
+          actorId: normalizedActorId,
           occurredAt: timestamp,
           payload: {}
+        });
+        const existingCase = ensureDisputeCase(mapTransaction(existing), {
+          openedByActorId: existing.buyer_id,
+          createdAt: existing.dispute_opened_at ?? timestamp
+        });
+        upsertDisputeCase.run({
+          transaction_id: id,
+          status: "resolved",
+          assigned_operator_id: existingCase.assignedOperatorId,
+          resolution_note: normalizedResolutionNote,
+          opened_by_actor_id: existingCase.openedByActorId,
+          opened_at: existingCase.openedAt,
+          resolved_at: timestamp,
+          updated_at: timestamp
+        });
+        appendDisputeCaseTimeline({
+          transactionId: id,
+          eventType: "status_changed",
+          actorId: normalizedActorId,
+          fromStatus: existingCase.status,
+          toStatus: "resolved",
+          note: normalizedResolutionNote,
+          metadata: { source: "resolve_dispute" },
+          createdAt: timestamp
         });
         enqueueOutboxRecords({
           transactionId: id,
@@ -12304,6 +12704,34 @@ export function createTransactionStore({
           actorId: decidedBy.trim(),
           occurredAt: timestamp,
           payload: { decision, reasonCode: normalizedReasonCode }
+        });
+        const existingCase = ensureDisputeCase(mapTransaction(existing), {
+          openedByActorId: existing.buyer_id,
+          createdAt: existing.dispute_opened_at ?? timestamp
+        });
+        upsertDisputeCase.run({
+          transaction_id: id,
+          status: "resolved",
+          assigned_operator_id: existingCase.assignedOperatorId,
+          resolution_note: notes ?? null,
+          opened_by_actor_id: existingCase.openedByActorId,
+          opened_at: existingCase.openedAt,
+          resolved_at: timestamp,
+          updated_at: timestamp
+        });
+        appendDisputeCaseTimeline({
+          transactionId: id,
+          eventType: "status_changed",
+          actorId: decidedBy.trim(),
+          fromStatus: existingCase.status,
+          toStatus: "resolved",
+          note: notes ?? null,
+          metadata: {
+            source: "adjudicate_dispute",
+            decision,
+            reasonCode: normalizedReasonCode
+          },
+          createdAt: timestamp
         });
 
         enqueueOutboxRecords({

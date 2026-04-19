@@ -8,6 +8,9 @@ const state = {
   currentTrust: null,
   currentEvents: [],
   currentEvidence: [],
+  currentDisputeTimeline: [],
+  currentDisputeCase: null,
+  selectedDisputeTransactionId: null,
   selectedModerationListingId: null,
   selectedRiskTransactionId: null,
   selectedRiskAccountId: null,
@@ -499,7 +502,7 @@ function renderEvidence() {
   for (const evidence of state.currentEvidence) {
     const item = document.createElement("li");
     const text = document.createElement("span");
-    text.textContent = `${evidence.originalFileName} (${evidence.sizeBytes} bytes)`;
+    text.textContent = `${evidence.originalFileName} (${evidence.sizeBytes} bytes)${evidence.note ? ` | note: ${evidence.note}` : ""}`;
     const download = document.createElement("button");
     download.type = "button";
     download.textContent = "Download";
@@ -546,6 +549,28 @@ function renderEvidence() {
   }
 }
 
+function renderDisputeTimeline() {
+  const listNode = qs("#dispute-timeline-list");
+  listNode.innerHTML = "";
+
+  if (state.currentDisputeTimeline.length === 0) {
+    const item = document.createElement("li");
+    item.textContent = "No dispute timeline loaded.";
+    listNode.appendChild(item);
+    return;
+  }
+
+  for (const entry of state.currentDisputeTimeline) {
+    const item = document.createElement("li");
+    const statusChange =
+      entry.fromStatus || entry.toStatus
+        ? ` [${entry.fromStatus || "-"} -> ${entry.toStatus || "-"}]`
+        : "";
+    item.innerHTML = `<span><strong>${escapeHtml(entry.eventType)}</strong>${escapeHtml(statusChange)} at ${escapeHtml(fmtDate(entry.createdAt))}</span><code>${escapeHtml(entry.actorId || "system")}</code>${entry.note ? `<div>${escapeHtml(entry.note)}</div>` : ""}`;
+    listNode.appendChild(item);
+  }
+}
+
 async function loadDisputeDetail(transactionId) {
   const payload = await apiRequest("GET", `/admin/disputes/${encodeURIComponent(transactionId)}`);
   const detail = payload.dispute;
@@ -562,6 +587,8 @@ async function loadDisputeDetail(transactionId) {
   qs("#admin-dispute-detail").innerHTML = `
     <p><strong>Transaction:</strong> <code>${escapeHtml(detail.transaction.id)}</code></p>
     <p><strong>Status:</strong> ${escapeHtml(detail.transaction.status)}</p>
+    <p><strong>Triage status:</strong> ${escapeHtml(detail.disputeCase?.status || "open")}</p>
+    <p><strong>Assigned operator:</strong> ${escapeHtml(detail.disputeCase?.assignedOperatorId || "-")}</p>
     <p><strong>Evidence:</strong> ${escapeHtml(detail.evidence.length)}</p>
     <p><strong>Buyer evidence:</strong> ${escapeHtml(buyerEvidence.length)}</p>
     <p><strong>Seller evidence:</strong> ${escapeHtml(sellerEvidence.length)}</p>
@@ -576,11 +603,28 @@ async function loadDisputeDetail(transactionId) {
   state.currentTrust = null;
   state.currentEvents = detail.events;
   state.currentEvidence = detail.evidence;
+  state.currentDisputeTimeline = detail.timeline ?? [];
+  state.currentDisputeCase = detail.disputeCase ?? null;
+  state.selectedDisputeTransactionId = detail.transaction.id;
   renderTransactionSummary();
   renderTransactionTrust();
   renderRatingState();
   renderEvents();
   renderEvidence();
+  renderDisputeTimeline();
+  setPanelStatus("#admin-dispute-triage-status", "");
+}
+
+async function fetchDisputeTimeline() {
+  const transactionId = ensureTransactionLoaded();
+  const payload = await apiRequest(
+    "GET",
+    `/transactions/${encodeURIComponent(transactionId)}/disputes/timeline`
+  );
+  state.currentDisputeTimeline = payload.timeline ?? [];
+  state.currentDisputeCase = payload.disputeCase ?? null;
+  renderDisputeTimeline();
+  log(`loaded ${state.currentDisputeTimeline.length} dispute timeline event(s)`);
 }
 
 function renderAdminQueue(disputes) {
@@ -894,6 +938,9 @@ async function loadListingReputation(sellerId) {
 async function fetchTransaction(transactionId) {
   const payload = await apiRequest("GET", `/transactions/${encodeURIComponent(transactionId)}`);
   state.currentTransaction = payload.transaction;
+  state.selectedDisputeTransactionId = payload.transaction.id;
+  state.currentDisputeTimeline = [];
+  state.currentDisputeCase = null;
   renderTransactionSummary();
   state.currentTrust = null;
   renderTransactionTrust();
@@ -1010,8 +1057,11 @@ function bindEvents() {
     state.user = null;
     state.currentTransaction = null;
     state.currentTrust = null;
-    state.currentEvents = [];
-    state.currentEvidence = [];
+  state.currentEvents = [];
+  state.currentEvidence = [];
+  state.currentDisputeTimeline = [];
+  state.currentDisputeCase = null;
+  state.selectedDisputeTransactionId = null;
     state.selectedListingReputation = null;
     state.selectedModerationListingId = null;
     state.selectedRiskTransactionId = null;
@@ -1025,6 +1075,7 @@ function bindEvents() {
     renderListingReputation();
     renderEvents();
     renderEvidence();
+    renderDisputeTimeline();
     setPanelStatus("#admin-moderation-status-line");
     setPanelStatus("#admin-risk-status-line");
     setPanelStatus("#launch-control-status-line");
@@ -1216,6 +1267,14 @@ function bindEvents() {
     }
   });
 
+  qs("#fetch-dispute-timeline").addEventListener("click", async () => {
+    try {
+      await fetchDisputeTimeline();
+    } catch (error) {
+      log(error.message, "error");
+    }
+  });
+
   qs("#confirm-delivery").addEventListener("click", async () => {
     try {
       const transactionId = ensureTransactionLoaded();
@@ -1338,12 +1397,34 @@ function bindEvents() {
           evidenceId: form.evidenceId.value || undefined,
           fileName: file.name,
           mimeType: file.type || "application/octet-stream",
-          contentBase64
+          contentBase64,
+          note: form.note.value || undefined
         }
       );
       log(`uploaded evidence for ${transactionId}`);
       await fetchEvidence();
+      await fetchDisputeTimeline();
       form.reset();
+    } catch (error) {
+      log(error.message, "error");
+    }
+  });
+
+  qs("#dispute-note-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const transactionId = ensureTransactionLoaded();
+      const form = event.currentTarget;
+      await apiRequest(
+        "POST",
+        `/transactions/${encodeURIComponent(transactionId)}/disputes/notes`,
+        {
+          note: form.note.value
+        }
+      );
+      form.reset();
+      await fetchDisputeTimeline();
+      log(`posted dispute note for ${transactionId}`);
     } catch (error) {
       log(error.message, "error");
     }
@@ -1424,6 +1505,48 @@ function bindEvents() {
       renderAdminQueue(payload.disputes);
       log(`loaded ${payload.disputes.length} admin disputes (${filter})`);
     } catch (error) {
+      log(error.message, "error");
+    }
+  });
+
+  qs("#admin-dispute-claim").addEventListener("click", async () => {
+    try {
+      const transactionId = state.selectedDisputeTransactionId || ensureTransactionLoaded();
+      await apiRequest(
+        "POST",
+        `/admin/disputes/${encodeURIComponent(transactionId)}/claim`,
+        {}
+      );
+      await loadDisputeDetail(transactionId);
+      setPanelStatus("#admin-dispute-triage-status", `Claimed ${transactionId}.`);
+      log(`claimed dispute ${transactionId}`);
+    } catch (error) {
+      setPanelStatus("#admin-dispute-triage-status", error.message, "error");
+      log(error.message, "error");
+    }
+  });
+
+  qs("#admin-dispute-triage-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const transactionId = state.selectedDisputeTransactionId || ensureTransactionLoaded();
+      const form = event.currentTarget;
+      await apiRequest(
+        "POST",
+        `/admin/disputes/${encodeURIComponent(transactionId)}/status`,
+        {
+          status: form.status.value,
+          resolutionNote: form.resolutionNote.value || undefined
+        }
+      );
+      await loadDisputeDetail(transactionId);
+      setPanelStatus(
+        "#admin-dispute-triage-status",
+        `Updated dispute ${transactionId} to ${form.status.value}.`
+      );
+      log(`updated dispute ${transactionId} triage status to ${form.status.value}`);
+    } catch (error) {
+      setPanelStatus("#admin-dispute-triage-status", error.message, "error");
       log(error.message, "error");
     }
   });
@@ -1765,6 +1888,7 @@ async function init() {
   renderRatingState();
   renderEvents();
   renderEvidence();
+  renderDisputeTimeline();
   renderTransactionInbox();
   bindEvents();
 

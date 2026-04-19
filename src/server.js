@@ -531,7 +531,8 @@ function getRateLimitPolicy(method, pathname) {
       /^\/transactions\/[^/]+\/acknowledge-completion$/.test(pathname) ||
       /^\/transactions\/[^/]+\/disputes$/.test(pathname) ||
       /^\/transactions\/[^/]+\/ratings$/.test(pathname) ||
-      /^\/transactions\/[^/]+\/disputes\/evidence$/.test(pathname))
+      /^\/transactions\/[^/]+\/disputes\/evidence$/.test(pathname) ||
+      /^\/transactions\/[^/]+\/disputes\/notes$/.test(pathname))
   ) {
     return { key: "transactionsWrite", max: routeRateLimits.transactionsWrite };
   }
@@ -632,6 +633,34 @@ function getRouteMetricLabels(method, pathname) {
       pathTemplate: "/transactions/:id/disputes/adjudicate",
       flow: "dispute.adjudicate",
       coreFlow: true
+    };
+  }
+  if (method === "GET" && /^\/transactions\/[^/]+\/disputes\/timeline$/.test(pathname)) {
+    return {
+      pathTemplate: "/transactions/:id/disputes/timeline",
+      flow: "dispute.timeline.read",
+      coreFlow: false
+    };
+  }
+  if (method === "POST" && /^\/transactions\/[^/]+\/disputes\/notes$/.test(pathname)) {
+    return {
+      pathTemplate: "/transactions/:id/disputes/notes",
+      flow: "dispute.note.add",
+      coreFlow: true
+    };
+  }
+  if (method === "POST" && /^\/admin\/disputes\/[^/]+\/claim$/.test(pathname)) {
+    return {
+      pathTemplate: "/admin/disputes/:id/claim",
+      flow: "dispute.triage.claim",
+      coreFlow: false
+    };
+  }
+  if (method === "POST" && /^\/admin\/disputes\/[^/]+\/status$/.test(pathname)) {
+    return {
+      pathTemplate: "/admin/disputes/:id/status",
+      flow: "dispute.triage.transition",
+      coreFlow: false
     };
   }
   if (method === "POST" && pathname === "/webhooks/stripe") {
@@ -3711,6 +3740,8 @@ export function createServer({
 
           const events = store.getTransactionEventHistory({ id: transactionId });
           const evidence = store.listDisputeEvidence({ transactionId });
+          const disputeCase = store.getDisputeCase({ transactionId });
+          const timeline = store.listDisputeTimeline({ transactionId, limit: 500 });
           const riskSignals = store.listRiskSignals({ transactionId, limit: 200 });
           const riskActions = store.listRiskOperatorActions({
             subjectType: "transaction",
@@ -3776,6 +3807,8 @@ export function createServer({
             dispute: {
               transaction,
               evidence,
+              disputeCase,
+              timeline,
               riskSignals,
               riskActions,
               trustCases,
@@ -3880,6 +3913,28 @@ export function createServer({
           }
           const evidence = store.listDisputeEvidence({ transactionId });
           sendJson(res, 200, { evidence });
+          return;
+        }
+
+        const disputeTimelineParams = getPathParams(
+          url.pathname,
+          /^\/transactions\/([^/]+)\/disputes\/timeline$/
+        );
+        if (disputeTimelineParams) {
+          const currentUser = requireAuth(req, store);
+          const [transactionId] = disputeTimelineParams;
+          assertSafeId(transactionId, "transactionId");
+          const transaction = store.getTransactionById(transactionId);
+          if (!transaction) {
+            sendJson(res, 404, { error: "transaction not found" });
+            return;
+          }
+          if (!canReadTransaction(currentUser, transaction)) {
+            throw new StoreError("forbidden", "only participants or admin can view dispute timeline");
+          }
+          const disputeCase = store.getDisputeCase({ transactionId });
+          const timeline = store.listDisputeTimeline({ transactionId, limit: 500 });
+          sendJson(res, 200, { disputeCase, timeline });
           return;
         }
 
@@ -4966,6 +5021,16 @@ export function createServer({
           if (!body.mimeType || typeof body.mimeType !== "string" || !body.mimeType.trim()) {
             throw new StoreError("validation", "mimeType is required");
           }
+          if (body.note !== undefined && body.note !== null && typeof body.note !== "string") {
+            throw new StoreError("validation", "note must be a string when provided");
+          }
+          if (
+            body.attachmentRefs !== undefined &&
+            body.attachmentRefs !== null &&
+            !Array.isArray(body.attachmentRefs)
+          ) {
+            throw new StoreError("validation", "attachmentRefs must be an array when provided");
+          }
 
           const content = parseBase64Content(body.contentBase64);
           if (content.length > resolvedEvidenceMaxBytes) {
@@ -5023,6 +5088,8 @@ export function createServer({
               sizeBytes: content.length,
               checksumSha256,
               storageKey,
+              note: body.note ?? null,
+              attachmentRefs: body.attachmentRefs ?? [],
               integrity: {
                 metadataConsistencyScore: metadataConsistency.metadataConsistencyScore,
                 duplicateWithinTransaction,
@@ -5041,6 +5108,88 @@ export function createServer({
           }
 
           sendJson(res, 201, { evidence });
+          return;
+        }
+
+        const disputeNotesParams = getPathParams(
+          url.pathname,
+          /^\/transactions\/([^/]+)\/disputes\/notes$/
+        );
+        if (disputeNotesParams) {
+          const currentUser = requireAuth(req, store);
+          ensureAccountRiskAllowsWrite(currentUser);
+          const [transactionId] = disputeNotesParams;
+          assertSafeId(transactionId, "transactionId");
+          const transaction = store.getTransactionById(transactionId);
+          if (!transaction) {
+            sendJson(res, 404, { error: "transaction not found" });
+            return;
+          }
+          if (!canReadTransaction(currentUser, transaction)) {
+            throw new StoreError(
+              "forbidden",
+              "only participants or admin can add dispute notes"
+            );
+          }
+          const body = await readJsonBody(req);
+          if (!body.note || typeof body.note !== "string" || !body.note.trim()) {
+            throw new StoreError("validation", "note is required");
+          }
+          if (
+            body.attachmentRefs !== undefined &&
+            body.attachmentRefs !== null &&
+            !Array.isArray(body.attachmentRefs)
+          ) {
+            throw new StoreError("validation", "attachmentRefs must be an array when provided");
+          }
+          const entry = store.addDisputeNote({
+            transactionId,
+            actorId: currentUser.id,
+            note: body.note,
+            attachmentRefs: body.attachmentRefs ?? []
+          });
+          sendJson(res, 201, { entry });
+          return;
+        }
+
+        const adminDisputeClaimParams = getPathParams(
+          url.pathname,
+          /^\/admin\/disputes\/([^/]+)\/claim$/
+        );
+        if (adminDisputeClaimParams) {
+          const currentUser = requireAuth(req, store);
+          requireRole(currentUser, "admin");
+          const [transactionId] = adminDisputeClaimParams;
+          assertSafeId(transactionId, "transactionId");
+          const body = await readJsonBody(req);
+          const disputeCase = store.claimDisputeCase({
+            transactionId,
+            operatorId: currentUser.id,
+            note: body.note ?? body.reasonCode ?? null
+          });
+          sendJson(res, 200, { disputeCase });
+          return;
+        }
+
+        const adminDisputeStatusParams = getPathParams(
+          url.pathname,
+          /^\/admin\/disputes\/([^/]+)\/status$/
+        );
+        if (adminDisputeStatusParams) {
+          const currentUser = requireAuth(req, store);
+          requireRole(currentUser, "admin");
+          const [transactionId] = adminDisputeStatusParams;
+          assertSafeId(transactionId, "transactionId");
+          const body = await readJsonBody(req);
+          const status = String(body.status ?? "").trim();
+          const resolutionNote = body.resolutionNote ?? body.note ?? null;
+          const disputeCase = store.transitionDisputeCase({
+            transactionId,
+            actorId: currentUser.id,
+            toStatus: status,
+            resolutionNote
+          });
+          sendJson(res, 200, { disputeCase });
           return;
         }
 
@@ -5226,7 +5375,12 @@ export function createServer({
           });
           const [transactionId] = resolveParams;
           assertSafeId(transactionId, "transactionId");
-          const transaction = store.resolveDispute({ id: transactionId });
+          const body = await readJsonBody(req);
+          const transaction = store.resolveDispute({
+            id: transactionId,
+            actorId: currentUser.id,
+            resolutionNote: body.note ?? body.resolutionNote ?? null
+          });
           cacheTransaction(transaction);
           incrementMetric("dispute.state_transition.total", { to: "resolved" }, 1);
           sendJson(res, 200, { transaction });

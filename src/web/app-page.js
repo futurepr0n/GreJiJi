@@ -214,10 +214,17 @@ export function renderWebAppPage() {
             <form id="evidence-form" class="stack">
               <h4>Upload dispute evidence</h4>
               <label>Evidence ID <input name="evidenceId" placeholder="optional-evidence-id" /></label>
+              <label>Note <textarea name="note" rows="2" placeholder="Optional context for this evidence"></textarea></label>
               <label>File <input required name="file" type="file" /></label>
               <button type="submit">Upload evidence</button>
             </form>
             <button type="button" class="ghost" id="fetch-evidence">List evidence</button>
+            <form id="dispute-note-form" class="stack">
+              <h4>Add dispute note</h4>
+              <label>Note <textarea name="note" rows="3" required placeholder="Add a follow-up comment or context"></textarea></label>
+              <button type="submit">Post dispute note</button>
+            </form>
+            <button type="button" class="ghost" id="fetch-dispute-timeline">Load dispute timeline</button>
           </div>
 
           <div class="card role-admin" hidden>
@@ -271,6 +278,12 @@ export function renderWebAppPage() {
             <ul id="evidence-list" class="list"></ul>
           </div>
         </div>
+        <div class="grid">
+          <div class="card">
+            <h3>Dispute timeline</h3>
+            <ul id="dispute-timeline-list" class="list"></ul>
+          </div>
+        </div>
       </section>
 
       <section class="panel role-admin" id="admin-disputes-panel" hidden>
@@ -294,6 +307,19 @@ export function renderWebAppPage() {
           <div class="card">
             <h3>Selected dispute detail</h3>
             <div id="admin-dispute-detail">Select a queue entry to load detail.</div>
+            <form id="admin-dispute-triage-form" class="stack">
+              <button type="button" id="admin-dispute-claim">Claim dispute</button>
+              <label>Status
+                <select name="status" required>
+                  <option value="under_review">under_review</option>
+                  <option value="resolved">resolved</option>
+                  <option value="rejected">rejected</option>
+                </select>
+              </label>
+              <label>Resolution note <textarea name="resolutionNote" rows="3" placeholder="Required for resolved/rejected"></textarea></label>
+              <button type="submit">Update triage status</button>
+            </form>
+            <p class="status" id="admin-dispute-triage-status"></p>
           </div>
         </div>
       </section>
