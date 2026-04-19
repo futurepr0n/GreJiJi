@@ -171,3 +171,18 @@ test("listing photo uploads persist and can be downloaded", async () => {
     assert.deepEqual(download.payload, sampleContent);
   });
 });
+
+test("demo asset endpoint serves deterministic SVG media", async () => {
+  await withTestServer(async ({ requestBinary }) => {
+    const okResponse = await requestBinary(
+      "GET",
+      "/demo-assets/chrono-trigger-snes-cib-box.svg"
+    );
+    assert.equal(okResponse.response.status, 200);
+    assert.equal(okResponse.response.headers.get("content-type"), "image/svg+xml; charset=utf-8");
+    assert.match(okResponse.payload.toString("utf8"), /GreJiJi Demo Asset/);
+
+    const missingResponse = await requestBinary("GET", "/demo-assets/unknown-asset.svg");
+    assert.equal(missingResponse.response.status, 404);
+  });
+});

@@ -16,6 +16,7 @@
     "deploy:validate:production": "node scripts/deploy/validate-deploy-config.js --env production",
     "deploy:migration-preflight": "node scripts/deploy/migration-preflight.js",
     "deploy:smoke": "node scripts/deploy/synthetic-smoke.js",
+    "deploy:verify:demo-listings": "node scripts/deploy/verify-demo-listings.js",
     "deploy:staging": "node scripts/deploy/run-deploy.js --env staging",
     "deploy:production": "node scripts/deploy/run-deploy.js --env production",
     "deploy:rollback:staging": "node scripts/deploy/run-rollback.js --env staging",
